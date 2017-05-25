@@ -4,7 +4,6 @@
 
 use chrono::{Duration, offset, DateTime};
 use directories::UserDirs;
-use futures::{Future, Async, IntoFuture, Stream};
 use futures::future::{self, Shared};
 use futures::{Async, Future, Stream};
 use hyper::client::{HttpConnector};
