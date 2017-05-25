@@ -42,6 +42,8 @@ pub struct S3Cache {
     bucket: Rc<Bucket>,
     /// Credentials provider.
     provider: AutoRefreshingProvider<ChainProvider>,
+    /// Whether or not to authenticate S3 GET requests.
+    get_auth: bool,
 }
 
 impl S3Cache {
@@ -58,9 +60,11 @@ impl S3Cache {
         let provider = AutoRefreshingProvider::new(ChainProvider::with_profile_providers(profile_providers, handle));
         //TODO: configurable SSL
         let bucket = Rc::new(Bucket::new(bucket, endpoint, Ssl::No, handle)?);
+        let get_auth = env::var("SCCACHE_S3_GET_AUTH").unwrap_or("false".to_string()).to_lowercase() == "true";
         Ok(S3Cache {
             bucket: bucket,
             provider: provider,
+            get_auth: get_auth,
         })
     }
 }
@@ -72,7 +76,8 @@ fn normalize_key(key: &str) -> String {
 impl Storage for S3Cache {
     fn get(&self, key: &str) -> SFuture<Cache> {
         let key = normalize_key(key);
-        Box::new(self.bucket.get(&key).then(|result| {
+
+        let result_cb = |result| {
             match result {
                 Ok(data) => {
                     let hit = CacheRead::from(io::Cursor::new(data))?;
@@ -83,7 +88,24 @@ impl Storage for S3Cache {
                     Ok(Cache::Miss)
                 }
             }
-        }))
+        };
+
+        if self.get_auth {
+            let bucket = self.bucket.clone();
+            let authed = self.provider
+                .credentials()
+                .chain_err(|| {
+                    "failed to get AWS credentials"
+                })
+                .and_then(move |credentials| bucket.get(&key, Some(&credentials)))
+                .then(result_cb);
+            Box::new(authed)
+        } else {
+            let open = self.bucket
+                .get(&key, None)
+                .then(result_cb);
+            Box::new(open)
+        }
     }
 
     fn put(&self, key: &str, entry: CacheWrite) -> SFuture<Duration> {
