@@ -1250,7 +1250,7 @@ impl ServerInfo {
 
 enum Frame<R, R1> {
     Body { chunk: Option<R1> },
-    Message { message: R, body: bool, }
+    Message { message: R, body: bool },
 }
 
 struct Body<R> {
