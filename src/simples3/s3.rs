@@ -10,7 +10,7 @@ use crypto::digest::Digest;
 use crypto::hmac::Hmac;
 use crypto::mac::Mac;
 use crypto::sha1::Sha1;
-use futures::{Future, Stream};
+use futures::{future, Future, Stream};
 use hyper::header;
 use hyper::Method;
 use reqwest;
@@ -113,14 +113,27 @@ impl Bucket {
                 .execute(request)
                 .chain_err(move || format!("failed GET: {}", url))
                 .and_then(|res| {
-                    if res.status().is_success() {
+                    let status = res.status();
+                    if status.is_success() {
                         let content_length = res
                             .headers()
                             .get::<header::ContentLength>()
                             .map(|&header::ContentLength(len)| len);
-                        Ok((res.into_body(), content_length))
+                        future::Either::A(future::ok((res.into_body(), content_length)))
                     } else {
-                        Err(ErrorKind::BadHTTPStatus(res.status().clone()).into())
+
+                        future::Either::B(res
+                            .into_body()
+                            .fold(Vec::new(), |mut body, chunk| {
+                                body.extend_from_slice(&chunk);
+                                Ok::<_, reqwest::Error>(body)
+                            })
+                            .chain_err(move || format!("failed to get body for error"))
+                            .and_then(move |vec| {
+                                warn!("{}", ::std::str::from_utf8(&vec).unwrap());
+                                Err(ErrorKind::BadHTTPStatus(status.clone()).into())
+                            })
+                        )
                     }
                 })
                 .and_then(|(body, content_length)| {
@@ -194,17 +207,29 @@ impl Bucket {
 
         Box::new(self.client.execute(request).then(|result| match result {
             Ok(res) => {
+                let status = res.status();
                 if res.status().is_success() {
                     trace!("PUT succeeded");
-                    Ok(())
+                    future::Either::A(future::ok(()))
                 } else {
                     trace!("PUT failed with HTTP status: {}", res.status());
-                    Err(ErrorKind::BadHTTPStatus(res.status().clone()).into())
+                    future::Either::B(res
+                        .into_body()
+                        .fold(Vec::new(), |mut body, chunk| {
+                            body.extend_from_slice(&chunk);
+                            Ok::<_, reqwest::Error>(body)
+                        })
+                        .chain_err(move || format!("failed to get body for error"))
+                        .and_then(move |vec| {
+                            warn!("{}", ::std::str::from_utf8(&vec).unwrap());
+                            Err(ErrorKind::BadHTTPStatus(status.clone()).into())
+                        })
+                    )
                 }
             }
             Err(e) => {
                 trace!("PUT failed with error: {:?}", e);
-                Err(e.into())
+                future::Either::A(future::err(e.into()))
             }
         }))
     }
