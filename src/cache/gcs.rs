@@ -28,10 +28,10 @@ use cache::{
 use chrono;
 use futures::future::Shared;
 use futures::{future, Async, Future, Stream};
-use hyper::header::{Authorization, Bearer, ContentType, ContentLength};
+use hyperx::header::{Authorization, Bearer, ContentType, ContentLength};
 use hyper::Method;
 use reqwest;
-use reqwest::unstable::async::{Request, Client};
+use reqwest::async::{Request, Client};
 use jwt;
 use openssl;
 use serde_json;
@@ -40,6 +40,7 @@ use url::form_urlencoded;
 use url::percent_encoding::{percent_encode, PATH_SEGMENT_ENCODE_SET, QUERY_ENCODE_SET};
 
 use errors::*;
+use util::HeadersExt;
 
 /// GCS bucket
 struct Bucket {
@@ -55,7 +56,7 @@ impl fmt::Display for Bucket {
 
 impl Bucket {
     pub fn new(name: String, handle: &Handle) -> Result<Bucket> {
-        let client = Client::new(handle);
+        let client = Client::new();
 
         Ok(Bucket { name, client })
     }
@@ -74,7 +75,7 @@ impl Bucket {
         };
 
         Box::new(creds_opt_future.and_then(move |creds_opt| {
-            let mut request = Request::new(Method::Get, url.parse().unwrap());
+            let mut request = Request::new(Method::GET, url.parse().unwrap());
             if let Some(creds) = creds_opt {
                 request.headers_mut()
                     .set(Authorization(Bearer { token: creds.token }));
@@ -112,7 +113,7 @@ impl Bucket {
         };
 
         Box::new(creds_opt_future.and_then(move |creds_opt| {
-            let mut request = Request::new(Method::Post, url.parse().unwrap());
+            let mut request = Request::new(Method::POST, url.parse().unwrap());
             {
                 let headers = request.headers_mut();
                 if let Some(creds) = creds_opt {
@@ -250,7 +251,7 @@ impl GCSCredentialProvider {
                 .append_pair("assertion", &auth_jwt)
                 .finish();
 
-            let mut request = Request::new(Method::Post, url.parse().unwrap());
+            let mut request = Request::new(Method::POST, url.parse().unwrap());
             {
                 let headers = request.headers_mut();
                 headers.set(ContentType::form_url_encoded());

@@ -39,8 +39,11 @@ extern crate flate2;
 #[macro_use]
 extern crate futures;
 extern crate futures_cpupool;
+extern crate http;
 #[cfg(feature = "hyper")]
 extern crate hyper;
+#[cfg(feature = "hyperx")]
+extern crate hyperx;
 #[cfg(test)]
 extern crate itertools;
 #[cfg(feature = "jsonwebtoken")]
@@ -63,13 +66,13 @@ extern crate number_prefix;
 #[cfg(feature = "openssl")]
 extern crate openssl;
 extern crate rand;
-extern crate ring;
 #[cfg(feature = "redis")]
 extern crate redis;
 extern crate regex;
 #[cfg(feature = "reqwest")]
 extern crate reqwest;
 extern crate retry;
+extern crate ring;
 #[cfg(feature = "rouille")]
 #[macro_use(router)]
 extern crate rouille;
@@ -160,3 +163,4 @@ fn init_logging() {
         }
     }
 }
+

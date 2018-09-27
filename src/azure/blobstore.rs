@@ -21,16 +21,19 @@ use crypto::mac::Mac;
 use crypto::md5::Md5;
 use crypto::sha2::Sha256;
 use futures::{Future, Stream};
-use hyper::{header, Method};
+use hyper::Method;
+use hyper::header::HeaderValue;
+use hyperx::header;
 use url::Url;
 use reqwest;
-use reqwest::unstable::async::{Request, Client};
+use reqwest::async::{Request, Client};
 use std::fmt;
 use std::str::FromStr;
 use time;
 use tokio_core::reactor::Handle;
 
 use errors::*;
+use util::HeadersExt;
 
 const BLOB_API_VERSION: &str = "2017-04-17";
 
@@ -75,7 +78,7 @@ impl BlobContainer {
 
         Ok(BlobContainer {
             url: container_url,
-            client: Client::new(handle),
+            client: Client::new(),
         })
     }
 
@@ -98,17 +101,17 @@ impl BlobContainer {
         let uri_copy = uri.clone();
         let uri_second_copy = uri.clone();
 
-        let mut request = Request::new(Method::Get, uri);
-        request.headers_mut().set_raw("x-ms-date", date);
-        request.headers_mut().set_raw("x-ms-version", BLOB_API_VERSION);
-        request.headers_mut().set_raw("Authorization", auth);
+        let mut request = Request::new(Method::GET, uri);
+        request.headers_mut().insert("x-ms-date", HeaderValue::from_str(&date).expect("Date is an invalid header value"));
+        request.headers_mut().insert("x-ms-version", HeaderValue::from_static(BLOB_API_VERSION));
+        request.headers_mut().insert("Authorization", HeaderValue::from_str(&auth).expect("Authorization is an invalid header value"));
 
         Box::new(self.client.execute(request).chain_err(move || {
             format!("failed GET: {}", uri_copy)
         }).and_then(|res| {
             if res.status().is_success() {
-                let content_length = res.headers().get::<header::ContentLength>()
-                    .map(|&header::ContentLength(len)| len);
+                let content_length = res.headers().get_hyperx::<header::ContentLength>()
+                    .map(|header::ContentLength(len)| len);
                 Ok((res.into_body(), content_length))
             } else {
                 Err(ErrorKind::BadHTTPStatus(res.status().clone()).into())
@@ -156,14 +159,14 @@ impl BlobContainer {
             &uri,
             creds);
 
-        let mut request = Request::new(Method::Put, uri);
+        let mut request = Request::new(Method::PUT, uri);
         request.headers_mut().set(header::ContentType(content_type.parse().unwrap()));
         request.headers_mut().set(header::ContentLength(content.len() as u64));
-        request.headers_mut().set_raw("x-ms-blob-type", "BlockBlob");
-        request.headers_mut().set_raw("x-ms-date", date);
-        request.headers_mut().set_raw("x-ms-version", BLOB_API_VERSION);
-        request.headers_mut().set_raw("Authorization", auth);
-        request.headers_mut().set_raw("Content-MD5", content_md5);
+        request.headers_mut().insert("x-ms-blob-type", HeaderValue::from_static("BlockBlob"));
+        request.headers_mut().insert("x-ms-date", HeaderValue::from_str(&date).expect("Invalid x-ms-date header"));
+        request.headers_mut().insert("x-ms-version", HeaderValue::from_static(BLOB_API_VERSION));
+        request.headers_mut().insert("Authorization", HeaderValue::from_str(&auth).expect("Invalid Authorization header"));
+        request.headers_mut().insert("Content-MD5", HeaderValue::from_str(&content_md5).expect("Invalid Content-MD5 header"));
 
         *request.body_mut() = Some(content.into());
 
