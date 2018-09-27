@@ -38,6 +38,7 @@ use redis;
 use reqwest;
 use serde_json;
 use tempfile;
+use tokio_timer;
 use walkdir;
 use which;
 
@@ -56,6 +57,7 @@ error_chain! {
         StrFromUtf8(::std::string::FromUtf8Error) #[cfg(feature = "gcs")];
         TempfilePersist(tempfile::PersistError);
         WalkDir(walkdir::Error);
+        Timer(tokio_timer::Error);
     }
 
     errors {

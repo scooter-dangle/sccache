@@ -23,18 +23,18 @@ use cache::{Cache, CacheRead, CacheWrite, Storage};
 use chrono;
 use futures::future::Shared;
 use futures::{future, Async, Future, Stream};
-use hyper::header::{Authorization, Bearer, ContentLength, ContentType};
 use hyper::Method;
+use hyperx::header::{Authorization, Bearer, ContentLength, ContentType};
 use jwt;
 use openssl;
 use reqwest;
-use reqwest::unstable::async::{Client, Request};
+use reqwest::async::{Client, Request};
 use serde_json;
-use tokio_core::reactor::Handle;
 use url::form_urlencoded;
 use url::percent_encoding::{percent_encode, PATH_SEGMENT_ENCODE_SET, QUERY_ENCODE_SET};
 
 use errors::*;
+use util::HeadersExt;
 
 /// GCS bucket
 struct Bucket {
@@ -49,8 +49,8 @@ impl fmt::Display for Bucket {
 }
 
 impl Bucket {
-    pub fn new(name: String, handle: &Handle) -> Result<Bucket> {
-        let client = Client::new(handle);
+    pub fn new(name: String) -> Result<Bucket> {
+        let client = Client::new();
 
         Ok(Bucket { name, client })
     }
@@ -71,7 +71,7 @@ impl Bucket {
         };
 
         Box::new(creds_opt_future.and_then(move |creds_opt| {
-            let mut request = Request::new(Method::Get, url.parse().unwrap());
+            let mut request = Request::new(Method::GET, url.parse().unwrap());
             if let Some(creds) = creds_opt {
                 request
                     .headers_mut()
@@ -118,7 +118,7 @@ impl Bucket {
         };
 
         Box::new(creds_opt_future.and_then(move |creds_opt| {
-            let mut request = Request::new(Method::Post, url.parse().unwrap());
+            let mut request = Request::new(Method::POST, url.parse().unwrap());
             {
                 let headers = request.headers_mut();
                 if let Some(creds) = creds_opt {
@@ -260,7 +260,7 @@ impl GCSCredentialProvider {
                         .append_pair("assertion", &auth_jwt)
                         .finish();
 
-                    let mut request = Request::new(Method::Post, url.parse().unwrap());
+                    let mut request = Request::new(Method::POST, url.parse().unwrap());
                     {
                         let headers = request.headers_mut();
                         headers.set(ContentType::form_url_encoded());
@@ -339,10 +339,9 @@ impl GCSCache {
         bucket: String,
         credential_provider: Option<GCSCredentialProvider>,
         rw_mode: RWMode,
-        handle: &Handle,
     ) -> Result<GCSCache> {
         Ok(GCSCache {
-            bucket: Rc::new(Bucket::new(bucket, handle)?),
+            bucket: Rc::new(Bucket::new(bucket)?),
             rw_mode: rw_mode,
             credential_provider: credential_provider,
         })

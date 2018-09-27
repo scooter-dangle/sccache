@@ -34,9 +34,10 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process;
 use strip_ansi_escapes::Writer;
-use tokio_core::reactor::Core;
+use tokio::runtime::current_thread::Runtime;
 use tokio_io::io::read_exact;
 use tokio_io::AsyncRead;
+use tokio_timer::Timeout;
 use util::run_input_output;
 use which::which_in;
 
@@ -80,13 +81,11 @@ fn run_server_process() -> Result<ServerStartup> {
     use futures::Stream;
     use std::time::Duration;
     use tempdir::TempDir;
-    use tokio_core::reactor::Timeout;
 
     trace!("run_server_process");
     let tempdir = TempDir::new("sccache")?;
     let socket_path = tempdir.path().join("sock");
-    let mut core = Core::new()?;
-    let handle = core.handle();
+    let mut runtime = Runtime::new()?;
     let listener = tokio_uds::UnixListener::bind(&socket_path)?;
     let exe_path = env::current_exe()?;
     let _child = process::Command::new(exe_path)
@@ -102,13 +101,16 @@ fn run_server_process() -> Result<ServerStartup> {
     });
 
     let timeout = Duration::from_millis(SERVER_STARTUP_TIMEOUT_MS.into());
-    let timeout = Timeout::new(timeout, &handle)?
-        .map_err(Error::from)
-        .map(|()| ServerStartup::TimedOut);
-    match core.run(startup.select(timeout)) {
-        Ok((e, _other)) => Ok(e),
-        Err((e, _other)) => Err(e.into()),
-    }
+    let timeout = Timeout::new(startup, timeout).or_else(|err| {
+        if err.is_elapsed() {
+            Ok(ServerStartup::TimedOut)
+        } else if err.is_inner() {
+            Err(err.into_inner().unwrap().into())
+        } else {
+            Err(err.into_timer().unwrap().into())
+        }
+    });
+    runtime.block_on(timeout)
 }
 
 /// Pipe `cmd`'s stdio to `/dev/null`, unless a specific env var is set.
@@ -134,7 +136,7 @@ fn daemonize() -> Result<()> {
     // We don't have a parent process any more once we've reached this point,
     // which means that no one's probably listening for our exit status.
     // In order to assist with debugging crashes of the server we configure our
-    // rlimit to allow core dumps and we also install a signal handler for
+    // rlimit to allow runtime dumps and we also install a signal handler for
     // segfaults which at least prints out what just happened.
     unsafe {
         match env::var("SCCACHE_ALLOW_CORE_DUMPS") {
@@ -184,7 +186,7 @@ fn daemonize() -> Result<()> {
             drop(writeln!(Stderr, "signal {} received", signum));
 
             // Configure the old handler and then resume the program. This'll
-            // likely go on to create a core dump if one's configured to be
+            // likely go on to create a runtime dump if one's configured to be
             // created.
             match signum {
                 libc::SIGBUS => libc::sigaction(signum, &*PREV_SIGBUS, 0 as *mut _),
@@ -237,13 +239,15 @@ fn redirect_error_log() -> Result<()> {
 /// Re-execute the current executable as a background server.
 #[cfg(windows)]
 fn run_server_process() -> Result<ServerStartup> {
+    use futures::future;
     use kernel32;
-    use mio_named_pipes::NamedPipe;
     use std::mem;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
     use std::time::Duration;
-    use tokio_core::reactor::{Core, PollEvented, Timeout};
+    use tokio::reactor::Handle;
+    use tokio::runtime::current_thread::Runtime;
+    use tokio_named_pipes::NamedPipe;
     use uuid::Uuid;
     use winapi::shared::minwindef::{DWORD, FALSE, LPVOID, TRUE};
     use winapi::um::processthreadsapi::{CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW};
@@ -254,15 +258,16 @@ fn run_server_process() -> Result<ServerStartup> {
     trace!("run_server_process");
 
     // Create a mini event loop and register our named pipe server
-    let mut core = Core::new()?;
-    let handle = core.handle();
+    let mut runtime = Runtime::new()?;
     let pipe_name = format!(r"\\.\pipe\{}", Uuid::new_v4().simple());
-    let server = NamedPipe::new(&pipe_name)?;
-    let server = PollEvented::new(server, &handle)?;
+    let server = runtime.block_on(future::lazy(|| {
+        NamedPipe::new(&pipe_name, &Handle::current())
+    }))?;
 
     // Connect a client to our server, and we'll wait below if it's still in
     // progress.
-    match server.get_ref().connect() {
+
+    match server.connect() {
         Ok(()) => {}
         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
         Err(e) => return Err(e.into()),
@@ -331,13 +336,16 @@ fn run_server_process() -> Result<ServerStartup> {
     let result = read_server_startup_status(server);
 
     let timeout = Duration::from_millis(SERVER_STARTUP_TIMEOUT_MS.into());
-    let timeout = Timeout::new(timeout, &handle)?
-        .map_err(Error::from)
-        .map(|()| ServerStartup::TimedOut);
-    match core.run(result.select(timeout)) {
-        Ok((e, _other)) => Ok(e),
-        Err((e, _other)) => Err(e).chain_err(|| "failed waiting for server to start"),
-    }
+    let timeout = Timeout::new(result, timeout).or_else(|err| {
+        if err.is_elapsed() {
+            Ok(ServerStartup::TimedOut)
+        } else if err.is_inner() {
+            Err(err.into_inner().unwrap().into())
+        } else {
+            Err(err.into_timer().unwrap().into())
+        }
+    });
+    runtime.block_on(timeout)
 }
 
 /// Attempt to connect to an sccache server listening on `port`, or start one if no server is running.
@@ -508,7 +516,7 @@ fn handle_compile_finished(
 /// locally using `creator` and return the result.
 fn handle_compile_response<T>(
     mut creator: T,
-    core: &mut Core,
+    runtime: &mut Runtime,
     conn: &mut ServerConnection,
     response: CompileResponse,
     exe: &Path,
@@ -541,7 +549,7 @@ where
                     return Err(e).chain_err(|| {
                         //TODO: something better here?
                         "error reading compile response from server"
-                    })
+                    });
                 }
             }
         }
@@ -560,7 +568,7 @@ where
     if log_enabled!(Trace) {
         trace!("running command: {:?}", cmd);
     }
-    match core.run(run_input_output(cmd, None)) {
+    match runtime.block_on(run_input_output(cmd, None)) {
         Ok(output) | Err(Error(ErrorKind::ProcessError(output), _)) => {
             if !output.stdout.is_empty() {
                 stdout.write_all(&output.stdout)?;
@@ -587,7 +595,7 @@ where
 /// See `request_compile` and `handle_compile_response`.
 pub fn do_compile<T>(
     creator: T,
-    core: &mut Core,
+    runtime: &mut Runtime,
     mut conn: ServerConnection,
     exe: &Path,
     cmdline: Vec<OsString>,
@@ -604,7 +612,7 @@ where
     let exe_path = which_in(exe, path, &cwd)?;
     let res = request_compile(&mut conn, &exe_path, &cmdline, &cwd, env_vars)?;
     handle_compile_response(
-        creator, core, &mut conn, res, &exe_path, cmdline, cwd, stdout, stderr,
+        creator, runtime, &mut conn, res, &exe_path, cmdline, cwd, stdout, stderr,
     )
 }
 
@@ -661,9 +669,9 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             use futures_cpupool::CpuPool;
 
             trace!("Command::PackageToolchain({})", executable.display());
-            let mut core = Core::new()?;
+            let mut runtime = Runtime::new()?;
             let jobserver = unsafe { Client::new() };
-            let creator = ProcessCommandCreator::new(&core.handle(), &jobserver);
+            let creator = ProcessCommandCreator::new(&jobserver);
             let env: Vec<_> = env::vars_os().collect();
             let pool = CpuPool::new(1);
             let out_file = File::create(out)?;
@@ -671,7 +679,7 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             let compiler = compiler::get_compiler_info(&creator, &executable, &env, &pool);
             let packager = compiler.map(|c| c.get_toolchain_packager());
             let res = packager.and_then(|p| p.write_pkg(out_file));
-            core.run(res)?
+            runtime.block_on(res)?
         }
         #[cfg(not(feature = "dist-client"))]
         Command::PackageToolchain(_executable, _out) => bail!(
@@ -686,10 +694,10 @@ pub fn run_command(cmd: Command) -> Result<i32> {
             trace!("Command::Compile {{ {:?}, {:?}, {:?} }}", exe, cmdline, cwd);
             let jobserver = unsafe { Client::new() };
             let conn = connect_or_start_server(get_port())?;
-            let mut core = Core::new()?;
+            let mut runtime = Runtime::new()?;
             let res = do_compile(
-                ProcessCommandCreator::new(&core.handle(), &jobserver),
-                &mut core,
+                ProcessCommandCreator::new(&jobserver),
+                &mut runtime,
                 conn,
                 exe.as_ref(),
                 cmdline,

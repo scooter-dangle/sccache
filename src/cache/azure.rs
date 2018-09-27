@@ -20,7 +20,6 @@ use futures::future::Future;
 use std::io;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-use tokio_core::reactor::Handle;
 
 use errors::*;
 
@@ -30,7 +29,7 @@ pub struct AzureBlobCache {
 }
 
 impl AzureBlobCache {
-    pub fn new(handle: &Handle) -> Result<AzureBlobCache> {
+    pub fn new() -> Result<AzureBlobCache> {
         let credentials = match EnvironmentProvider.provide_credentials() {
             Ok(creds) => creds,
             Err(_) => bail!("Could not find Azure credentials in the environment"),
@@ -39,7 +38,6 @@ impl AzureBlobCache {
         let container = match BlobContainer::new(
             credentials.azure_blob_endpoint(),
             credentials.blob_container_name(),
-            handle,
         ) {
             Ok(container) => container,
             Err(e) => bail!("Error instantiating BlobContainer: {:?}", e),

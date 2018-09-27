@@ -33,7 +33,6 @@ use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_core::reactor::Handle;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -165,13 +164,13 @@ pub trait Storage {
 }
 
 /// Get a suitable `Storage` implementation from configuration.
-pub fn storage_from_config(pool: &CpuPool, _handle: &Handle) -> Arc<Storage> {
+pub fn storage_from_config(pool: &CpuPool) -> Arc<Storage> {
     for cache_type in CONFIG.caches.iter() {
         match *cache_type {
             CacheType::Azure(config::AzureCacheConfig) => {
                 debug!("Trying Azure Blob Store account");
                 #[cfg(feature = "azure")]
-                match AzureBlobCache::new(_handle) {
+                match AzureBlobCache::new() {
                     Ok(storage) => {
                         trace!("Using AzureBlobCache");
                         return Arc::new(storage);
@@ -190,36 +189,34 @@ pub fn storage_from_config(pool: &CpuPool, _handle: &Handle) -> Arc<Storage> {
                 );
                 #[cfg(feature = "gcs")]
                 {
-                    let service_account_key_opt: Option<gcs::ServiceAccountKey> = if let Some(
-                        ref cred_path,
-                    ) = *cred_path
-                    {
-                        // Attempt to read the service account key from file
-                        let service_account_key_res: Result<
-                            gcs::ServiceAccountKey,
-                        > = (|| {
-                            let mut file = File::open(&cred_path)?;
-                            let mut service_account_json = String::new();
-                            file.read_to_string(&mut service_account_json)?;
-                            Ok(serde_json::from_str(&service_account_json)?)
-                        })();
+                    let service_account_key_opt: Option<gcs::ServiceAccountKey> =
+                        if let Some(ref cred_path) = *cred_path {
+                            // Attempt to read the service account key from file
+                            let service_account_key_res: Result<
+                                gcs::ServiceAccountKey,
+                            > = (|| {
+                                let mut file = File::open(&cred_path)?;
+                                let mut service_account_json = String::new();
+                                file.read_to_string(&mut service_account_json)?;
+                                Ok(serde_json::from_str(&service_account_json)?)
+                            })();
 
-                        // warn! if an error was encountered reading the key from the file
-                        if let Err(ref e) = service_account_key_res {
+                            // warn! if an error was encountered reading the key from the file
+                            if let Err(ref e) = service_account_key_res {
+                                warn!(
+                                    "Failed to parse service account credentials from file: {:?}. \
+                                     Continuing without authentication.",
+                                    e
+                                );
+                            }
+
+                            service_account_key_res.ok()
+                        } else {
                             warn!(
-                                "Failed to parse service account credentials from file: {:?}. \
-                                 Continuing without authentication.",
-                                e
-                            );
-                        }
-
-                        service_account_key_res.ok()
-                    } else {
-                        warn!(
                             "No SCCACHE_GCS_KEY_PATH specified-- no authentication will be used."
                         );
-                        None
-                    };
+                            None
+                        };
 
                     let gcs_read_write_mode = match rw_mode {
                         config::GCSCacheRWMode::ReadOnly => RWMode::ReadOnly,
@@ -229,12 +226,7 @@ pub fn storage_from_config(pool: &CpuPool, _handle: &Handle) -> Arc<Storage> {
                     let gcs_cred_provider = service_account_key_opt
                         .map(|path| GCSCredentialProvider::new(gcs_read_write_mode, path));
 
-                    match GCSCache::new(
-                        bucket.to_owned(),
-                        gcs_cred_provider,
-                        gcs_read_write_mode,
-                        _handle,
-                    ) {
+                    match GCSCache::new(bucket.to_owned(), gcs_cred_provider, gcs_read_write_mode) {
                         Ok(s) => {
                             trace!("Using GCSCache");
                             return Arc::new(s);
@@ -271,7 +263,7 @@ pub fn storage_from_config(pool: &CpuPool, _handle: &Handle) -> Arc<Storage> {
             }) => {
                 debug!("Trying S3Cache({}, {})", bucket, endpoint);
                 #[cfg(feature = "s3")]
-                match S3Cache::new(&bucket, &endpoint, _handle) {
+                match S3Cache::new(&bucket, &endpoint) {
                     Ok(s) => {
                         trace!("Using S3Cache");
                         return Arc::new(s);

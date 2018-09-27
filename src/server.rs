@@ -20,10 +20,9 @@ use compiler::{
 use config::CONFIG;
 use dist;
 use filetime::FileTime;
-use futures::future;
 use futures::sync::mpsc;
 use futures::task::{self, Task};
-use futures::{Async, AsyncSink, Future, Poll, Sink, StartSend, Stream};
+use futures::{future, stream, Async, AsyncSink, Future, Poll, Sink, StartSend, Stream};
 use futures_cpupool::CpuPool;
 use jobserver::Client;
 use mock_command::{CommandCreatorSync, ProcessCommandCreator};
@@ -40,17 +39,16 @@ use std::path::PathBuf;
 use std::process::{ExitStatus, Output};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::u64;
-use tokio_core::net::TcpListener;
-use tokio_core::reactor::{Core, Handle, Timeout};
+use tokio;
+use tokio::runtime::current_thread::{Handle, Runtime};
 use tokio_io::codec::length_delimited::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_proto::streaming::pipeline::{Frame, ServerProto, Transport};
-use tokio_proto::streaming::{Body, Message};
-use tokio_proto::BindServer;
 use tokio_serde_bincode::{ReadBincode, WriteBincode};
 use tokio_service::Service;
+use tokio_tcp::TcpListener;
+use tokio_timer::{Delay, Timeout};
 use util; //::fmt_duration_as_secs;
 
 use errors::*;
@@ -123,14 +121,13 @@ fn get_signal(_status: ExitStatus) -> i32 {
 pub fn start_server(port: u16) -> Result<()> {
     info!("start_server: port: {}", port);
     let client = unsafe { Client::new() };
-    let core = Core::new()?;
+    let runtime = Runtime::new()?;
     let pool = CpuPool::new(20);
     let dist_client: Arc<dist::Client> = match CONFIG.dist.scheduler_addr {
         #[cfg(feature = "dist-client")]
         Some(addr) => {
             info!("Enabling distributed sccache to {}", addr);
             Arc::new(dist::http::Client::new(
-                &core.handle(),
                 &pool,
                 addr,
                 &CONFIG.dist.cache_dir.join("client"),
@@ -149,9 +146,15 @@ pub fn start_server(port: u16) -> Result<()> {
             Arc::new(dist::NoopClient)
         }
     };
-    let storage = storage_from_config(&pool, &core.handle());
-    let res =
-        SccacheServer::<ProcessCommandCreator>::new(port, pool, core, client, dist_client, storage);
+    let storage = storage_from_config(&pool);
+    let res = SccacheServer::<ProcessCommandCreator>::new(
+        port,
+        pool,
+        runtime,
+        client,
+        dist_client,
+        storage,
+    );
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
     match res {
         Ok(srv) => {
@@ -171,7 +174,7 @@ pub fn start_server(port: u16) -> Result<()> {
 }
 
 pub struct SccacheServer<C: CommandCreatorSync> {
-    core: Core,
+    runtime: Runtime,
     listener: TcpListener,
     rx: mpsc::Receiver<ServerMessage>,
     timeout: Duration,
@@ -183,24 +186,30 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
     pub fn new(
         port: u16,
         pool: CpuPool,
-        core: Core,
+        runtime: Runtime,
         client: Client,
         dist_client: Arc<dist::Client>,
         storage: Arc<Storage>,
     ) -> Result<SccacheServer<C>> {
-        let handle = core.handle();
         let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port);
-        let listener = TcpListener::bind(&SocketAddr::V4(addr), &handle)?;
+        let listener = TcpListener::bind(&SocketAddr::V4(addr))?;
 
         // Prepare the service which we'll use to service all incoming TCP
         // connections.
         let (tx, rx) = mpsc::channel(1);
         let (wait, info) = WaitUntilZero::new();
-        let service =
-            SccacheService::new(dist_client, storage, core.handle(), &client, pool, tx, info);
+        let service = SccacheService::new(
+            dist_client,
+            storage,
+            runtime.handle(),
+            &client,
+            pool,
+            tx,
+            info,
+        );
 
         Ok(SccacheServer {
-            core: core,
+            runtime: runtime,
             listener: listener,
             rx: rx,
             service: service,
@@ -253,7 +262,7 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
 
     fn _run<'a>(self, shutdown: Box<Future<Item = (), Error = ()> + 'a>) -> io::Result<()> {
         let SccacheServer {
-            mut core,
+            mut runtime,
             listener,
             rx,
             service,
@@ -263,10 +272,13 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
 
         // Create our "server future" which will simply handle all incoming
         // connections in separate tasks.
-        let handle = core.handle();
-        let server = listener.incoming().for_each(move |(socket, _addr)| {
+        let server = listener.incoming().for_each(move |socket| {
             trace!("incoming connection");
-            SccacheProto.bind_server(&handle, socket, service.clone());
+            tokio::runtime::current_thread::TaskExecutor::current()
+                .spawn_local(Box::new(service.clone().bind(socket).map_err(|err| {
+                    error!("{}", err);
+                })))
+                .unwrap();
             Ok(())
         });
 
@@ -281,7 +293,6 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         // The `ShutdownOrInactive` indicates the RPC or the period of
         // inactivity, and this is then select'd with the `shutdown` future
         // passed to this function.
-        let handle = core.handle();
 
         let shutdown = shutdown.map(|a| {
             info!("shutting down due to explicit signal");
@@ -299,11 +310,10 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         let shutdown_idle = ShutdownOrInactive {
             rx: rx,
             timeout: if timeout != Duration::new(0, 0) {
-                Some(Timeout::new(timeout, &handle)?)
+                Some(Delay::new(Instant::now() + timeout))
             } else {
                 None
             },
-            handle: handle.clone(),
             timeout_dur: timeout,
         };
         futures.push(Box::new(shutdown_idle.map(|a| {
@@ -312,7 +322,7 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         })));
 
         let server = future::select_all(futures);
-        core.run(server).map_err(|p| p.0)?;
+        runtime.block_on(server).map_err(|p| p.0)?;
 
         info!(
             "moving into the shutdown phase now, waiting at most 10 seconds \
@@ -326,8 +336,15 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         //
         // Note that we cap the amount of time this can take, however, as we
         // don't want to wait *too* long.
-        core.run(wait.select(Timeout::new(Duration::new(10, 0), &handle)?))
-            .map_err(|p| p.0)?;
+        runtime
+            .block_on(Timeout::new(wait, Duration::new(10, 0)))
+            .map_err(|e| {
+                if e.is_inner() {
+                    e.into_inner().unwrap()
+                } else {
+                    io::Error::new(io::ErrorKind::Other, e)
+                }
+            })?;
 
         info!("ok, fully shutting down now");
 
@@ -373,8 +390,8 @@ struct SccacheService<C: CommandCreatorSync> {
     info: ActiveInfo,
 }
 
-type SccacheRequest = Message<Request, Body<(), Error>>;
-type SccacheResponse = Message<Response, Body<Response, Error>>;
+type SccacheRequest = Message<Request, Body<()>>;
+type SccacheResponse = Message<Response, Body<Response>>;
 
 /// Messages sent from all services to the main event loop indicating activity.
 ///
@@ -459,11 +476,46 @@ where
             storage: storage,
             compilers: Rc::new(RefCell::new(HashMap::new())),
             pool: pool,
-            creator: C::new(&handle, client),
+            creator: C::new(client),
             handle: handle,
             tx: tx,
             info: info,
         }
+    }
+
+    fn bind<T>(self, socket: T) -> impl Future<Item = (), Error = Error>
+    where
+        T: AsyncRead + AsyncWrite + 'static,
+    {
+        let (sink, stream) = SccacheTransport {
+            inner: WriteBincode::new(ReadBincode::new(Framed::new(socket))),
+        }
+        .split();
+        let sink = sink.sink_from_err::<Error>();
+
+        stream
+            .from_err::<Error>()
+            .and_then(move |input| self.call(input))
+            .and_then(|message| {
+                let f: Box<Stream<Item = _, Error = _>> = match message {
+                    Message::WithoutBody(message) => Box::new(stream::once(Ok(Frame::Message {
+                        message,
+                        body: false,
+                    }))),
+                    Message::WithBody(message, body) => Box::new(
+                        stream::once(Ok(Frame::Message {
+                            message,
+                            body: true,
+                        }))
+                        .chain(body.map(|chunk| Frame::Body { chunk: Some(chunk) }))
+                        .chain(stream::once(Ok(Frame::Body { chunk: None }))),
+                    ),
+                };
+                Ok(f.from_err::<Error>())
+            })
+            .flatten()
+            .forward(sink)
+            .map(|_| ())
     }
 
     /// Get info and stats about the cache.
@@ -635,7 +687,6 @@ where
             env_vars,
             cache_control,
             self.pool.clone(),
-            self.handle.clone(),
         );
         let me = self.clone();
         let task = result.then(move |result| {
@@ -746,7 +797,9 @@ where
             send.join(cache_write).then(|_| Ok(()))
         });
 
-        self.handle.spawn(task);
+        tokio::runtime::current_thread::TaskExecutor::current()
+            .spawn_local(Box::new(task))
+            .unwrap();
     }
 }
 
@@ -958,25 +1011,46 @@ impl ServerInfo {
     }
 }
 
-/// tokio-proto protocol implementation for sccache
-struct SccacheProto;
+enum Frame<R, R1> {
+    Body { chunk: Option<R1> },
+    Message { message: R, body: bool },
+}
 
-impl<I> ServerProto<I> for SccacheProto
-where
-    I: AsyncRead + AsyncWrite + 'static,
-{
-    type Request = Request;
-    type RequestBody = ();
-    type Response = Response;
-    type ResponseBody = Response;
+struct Body<R> {
+    receiver: mpsc::Receiver<Result<R>>,
+}
+
+impl<R> Body<R> {
+    fn pair() -> (mpsc::Sender<Result<R>>, Self) {
+        let (tx, rx) = mpsc::channel(0);
+        (tx, Body { receiver: rx })
+    }
+}
+
+impl<R> Stream for Body<R> {
+    type Item = R;
     type Error = Error;
-    type Transport = SccacheTransport<I>;
-    type BindTransport = future::FutureResult<Self::Transport, io::Error>;
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        match self.receiver.poll().unwrap() {
+            Async::Ready(Some(Ok(item))) => Ok(Async::Ready(Some(item))),
+            Async::Ready(Some(Err(err))) => Err(err),
+            Async::Ready(None) => Ok(Async::Ready(None)),
+            Async::NotReady => Ok(Async::NotReady),
+        }
+    }
+}
 
-    fn bind_transport(&self, io: I) -> Self::BindTransport {
-        future::ok(SccacheTransport {
-            inner: WriteBincode::new(ReadBincode::new(Framed::new(io))),
-        })
+enum Message<R, B> {
+    WithBody(R, B),
+    WithoutBody(R),
+}
+
+impl<R, B> Message<R, B> {
+    fn into_inner(self) -> R {
+        match self {
+            Message::WithBody(r, _) => r,
+            Message::WithoutBody(r) => r,
+        }
     }
 }
 
@@ -1000,7 +1074,7 @@ struct SccacheTransport<I: AsyncRead + AsyncWrite> {
 }
 
 impl<I: AsyncRead + AsyncWrite> Stream for SccacheTransport<I> {
-    type Item = Frame<Request, (), Error>;
+    type Item = Message<Request, Body<()>>;
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, io::Error> {
@@ -1008,17 +1082,12 @@ impl<I: AsyncRead + AsyncWrite> Stream for SccacheTransport<I> {
             error!("SccacheTransport::poll failed: {}", e);
             io::Error::new(io::ErrorKind::Other, e)
         }));
-        Ok(msg
-            .map(|m| Frame::Message {
-                message: m,
-                body: false,
-            })
-            .into())
+        Ok(msg.map(|m| Message::WithoutBody(m)).into())
     }
 }
 
 impl<I: AsyncRead + AsyncWrite> Sink for SccacheTransport<I> {
-    type SinkItem = Frame<Response, Response, Error>;
+    type SinkItem = Frame<Response, Response>;
     type SinkError = io::Error;
 
     fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, io::Error> {
@@ -1037,13 +1106,6 @@ impl<I: AsyncRead + AsyncWrite> Sink for SccacheTransport<I> {
                 }
             },
             Frame::Body { chunk: None } => Ok(AsyncSink::Ready),
-            Frame::Error { error } => {
-                error!("client hit an error:");
-                for e in error.iter() {
-                    error!("\t{}", e);
-                }
-                Err(io::Error::new(io::ErrorKind::Other, "application error"))
-            }
         }
     }
 
@@ -1056,12 +1118,9 @@ impl<I: AsyncRead + AsyncWrite> Sink for SccacheTransport<I> {
     }
 }
 
-impl<I: AsyncRead + AsyncWrite + 'static> Transport for SccacheTransport<I> {}
-
 struct ShutdownOrInactive {
     rx: mpsc::Receiver<ServerMessage>,
-    handle: Handle,
-    timeout: Option<Timeout>,
+    timeout: Option<Delay>,
     timeout_dur: Duration,
 }
 
@@ -1077,7 +1136,7 @@ impl Future for ShutdownOrInactive {
                 Async::Ready(Some(ServerMessage::Shutdown)) => return Ok(().into()),
                 Async::Ready(Some(ServerMessage::Request)) => {
                     if self.timeout_dur != Duration::new(0, 0) {
-                        self.timeout = Some(Timeout::new(self.timeout_dur, &self.handle)?);
+                        self.timeout = Some(Delay::new(Instant::now() + self.timeout_dur));
                     }
                 }
                 // All services have shut down, in theory this isn't possible...
@@ -1086,7 +1145,9 @@ impl Future for ShutdownOrInactive {
         }
         match self.timeout {
             None => Ok(Async::NotReady),
-            Some(ref mut timeout) => timeout.poll(),
+            Some(ref mut timeout) => timeout
+                .poll()
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, err)),
         }
     }
 }

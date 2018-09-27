@@ -25,11 +25,13 @@ mod common {
     use bincode;
     use dist::{CompileCommand, JobId};
     use futures::{Future, Stream};
+    use hyperx::header;
     use reqwest;
     use serde;
     use std::net::{IpAddr, SocketAddr};
 
     use errors::*;
+    use util::RequestExt;
 
     const SCHEDULER_PORT: u16 = 10500;
     const SERVER_PORT: u16 = 10501;
@@ -53,46 +55,42 @@ mod common {
     }
 
     // Note that content-length is necessary due to https://github.com/tiny-http/tiny-http/issues/147
-    pub trait ReqwestRequestBuilderExt {
-        fn bincode<T: serde::Serialize + ?Sized>(&mut self, bincode: &T) -> Result<&mut Self>;
-        fn bytes(&mut self, bytes: Vec<u8>) -> &mut Self;
-        fn bearer_auth(&mut self, token: String) -> &mut Self;
+    pub trait ReqwestRequestBuilderExt: Sized {
+        fn bincode<T: serde::Serialize + ?Sized>(self, bincode: &T) -> Result<Self>;
+        fn bytes(self, bytes: Vec<u8>) -> Self;
+        fn bearer_auth(self, token: String) -> Self;
     }
     impl ReqwestRequestBuilderExt for reqwest::RequestBuilder {
-        fn bincode<T: serde::Serialize + ?Sized>(&mut self, bincode: &T) -> Result<&mut Self> {
+        fn bincode<T: serde::Serialize + ?Sized>(self, bincode: &T) -> Result<Self> {
             let bytes = bincode::serialize(bincode)?;
             Ok(self.bytes(bytes))
         }
-        fn bytes(&mut self, bytes: Vec<u8>) -> &mut Self {
-            self.header(reqwest::header::ContentType::octet_stream())
-                .header(reqwest::header::ContentLength(bytes.len() as u64))
+        fn bytes(self, bytes: Vec<u8>) -> Self {
+            self.set_header(header::ContentType::octet_stream())
+                .set_header(header::ContentLength(bytes.len() as u64))
                 .body(bytes)
         }
-        fn bearer_auth(&mut self, token: String) -> &mut Self {
-            self.header(reqwest::header::Authorization(reqwest::header::Bearer {
-                token,
-            }))
+        fn bearer_auth(self, token: String) -> Self {
+            self.set_header(header::Authorization(header::Bearer { token }))
         }
     }
-    impl ReqwestRequestBuilderExt for reqwest::unstable::async::RequestBuilder {
-        fn bincode<T: serde::Serialize + ?Sized>(&mut self, bincode: &T) -> Result<&mut Self> {
+    impl ReqwestRequestBuilderExt for reqwest::async::RequestBuilder {
+        fn bincode<T: serde::Serialize + ?Sized>(self, bincode: &T) -> Result<Self> {
             let bytes = bincode::serialize(bincode)?;
             Ok(self.bytes(bytes))
         }
-        fn bytes(&mut self, bytes: Vec<u8>) -> &mut Self {
-            self.header(reqwest::header::ContentType::octet_stream())
-                .header(reqwest::header::ContentLength(bytes.len() as u64))
+        fn bytes(self, bytes: Vec<u8>) -> Self {
+            self.set_header(header::ContentType::octet_stream())
+                .set_header(header::ContentLength(bytes.len() as u64))
                 .body(bytes)
         }
-        fn bearer_auth(&mut self, token: String) -> &mut Self {
-            self.header(reqwest::header::Authorization(reqwest::header::Bearer {
-                token,
-            }))
+        fn bearer_auth(self, token: String) -> Self {
+            self.set_header(header::Authorization(header::Bearer { token }))
         }
     }
 
     pub fn bincode_req<T: serde::de::DeserializeOwned + 'static>(
-        req: &mut reqwest::RequestBuilder,
+        req: reqwest::RequestBuilder,
     ) -> Result<T> {
         let mut res = req.send()?;
         let status = res.status();
@@ -111,7 +109,7 @@ mod common {
         }
     }
     pub fn bincode_req_fut<T: serde::de::DeserializeOwned + 'static>(
-        req: &mut reqwest::unstable::async::RequestBuilder,
+        req: reqwest::async::RequestBuilder,
     ) -> SFuture<T> {
         Box::new(
             req.send()
@@ -663,7 +661,6 @@ mod client {
     use std::net::{IpAddr, SocketAddr};
     use std::path::Path;
     use std::time::Duration;
-    use tokio_core;
 
     use super::common::{
         bincode_req, bincode_req_fut, Cfg, ReqwestRequestBuilderExt, RunJobHttpRequest,
@@ -682,14 +679,13 @@ mod client {
         // TODO: this should really only use the async client, but reqwest async bodies are extremely limited
         // and only support owned bytes, which means the whole toolchain would end up in memory
         client: reqwest::Client,
-        client_async: reqwest::unstable::async::Client,
+        client_async: reqwest::async::Client,
         pool: CpuPool,
         tc_cache: cache::ClientToolchains,
     }
 
     impl Client {
         pub fn new(
-            handle: &tokio_core::reactor::Handle,
             pool: &CpuPool,
             scheduler_addr: IpAddr,
             cache_dir: &Path,
@@ -702,9 +698,9 @@ mod client {
                 .timeout(timeout)
                 .build()
                 .unwrap();
-            let client_async = reqwest::unstable::async::ClientBuilder::new()
+            let client_async = reqwest::async::ClientBuilder::new()
                 .timeout(timeout)
-                .build(handle)
+                .build()
                 .unwrap();
             Self {
                 auth,
@@ -748,8 +744,8 @@ mod client {
                 let mut req = self.client.post(&url);
 
                 Box::new(self.pool.spawn_fn(move || {
-                    req.bearer_auth(job_alloc.auth.clone()).body(toolchain_file);
-                    bincode_req(&mut req)
+                    req = req.bearer_auth(job_alloc.auth.clone()).body(toolchain_file);
+                    bincode_req(req)
                 }))
             } else {
                 f_err("couldn't find toolchain locally")
@@ -791,8 +787,8 @@ mod client {
                     compressor.finish().unwrap();
                 }
 
-                req.bearer_auth(job_alloc.auth.clone()).bytes(body);
-                bincode_req(&mut req).map(|res| (res, path_transformer))
+                req = req.bearer_auth(job_alloc.auth.clone()).bytes(body);
+                bincode_req(req).map(|res| (res, path_transformer))
             }))
         }
 

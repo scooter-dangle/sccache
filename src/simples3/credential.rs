@@ -6,25 +6,27 @@ use chrono::{offset, DateTime, Duration};
 use directories::UserDirs;
 use futures::future::{self, Shared};
 use futures::{Async, Future, IntoFuture, Stream};
-use hyper::client::{HttpConnector, Request};
-use hyper::header::Connection;
-use hyper::{self, Client, Method};
+use futures::{Async, Future, Stream};
+use hyper::client::HttpConnector;
+use hyper::{self, Client, Request};
+use hyperx::header::Connection;
 use regex::Regex;
 use serde_json::{from_str, Value};
 #[allow(unused_imports, deprecated)]
 use std::ascii::AsciiExt;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::env;
 use std::env::*;
-use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
-use tokio_core::reactor::{Handle, Timeout};
+use tokio_timer::Timeout;
 
 use errors::*;
+use util::RequestExt;
 
 /// AWS API access credentials, including access key, secret key, token (for IAM profiles), and
 /// expiration timestamp.
@@ -290,24 +292,24 @@ fn parse_credentials_file(file_path: &Path) -> Result<HashMap<String, AwsCredent
 /// Provides AWS credentials from a resource's IAM role.
 pub struct IamProvider {
     client: Client<HttpConnector>,
-    handle: Handle,
 }
 
 impl IamProvider {
-    pub fn new(handle: &Handle) -> IamProvider {
+    pub fn new() -> IamProvider {
         IamProvider {
-            client: Client::new(handle),
-            handle: handle.clone(),
+            client: Client::new(),
         }
     }
 
     fn iam_role(&self) -> SFuture<String> {
         // First get the IAM role
         let address = "http://169.254.169.254/latest/meta-data/iam/security-credentials/";
-        let mut req = Request::new(Method::Get, address.parse().unwrap());
-        req.headers_mut().set(Connection::close());
+        let req = Request::get(address)
+            .set_header(Connection::close())
+            .body("".into())
+            .unwrap();
         let response = self.client.request(req).and_then(|response| {
-            response.body().fold(Vec::new(), |mut body, chunk| {
+            response.into_body().fold(Vec::new(), |mut body, chunk| {
                 body.extend_from_slice(&chunk);
                 Ok::<_, hyper::Error>(body)
             })
@@ -336,22 +338,24 @@ impl ProvideAwsCredentials for IamProvider {
             Err(_) => self.iam_role(),
         };
         let url = url.and_then(|url| {
-            url.parse()
+            url.parse::<hyper::Uri>()
                 .chain_err(|| format!("failed to parse `{}` as url", url))
         });
 
         let client = self.client.clone();
         let response = url.and_then(move |address| {
             debug!("Attempting to fetch credentials from {}", address);
-            let mut req = Request::new(Method::Get, address);
-            req.headers_mut().set(Connection::close());
+            let req = Request::get(address)
+                .set_header(Connection::close())
+                .body("".into())
+                .unwrap();
             client
                 .request(req)
                 .chain_err(|| "failed to send http request")
         });
         let body = response.and_then(|response| {
             response
-                .body()
+                .into_body()
                 .fold(Vec::new(), |mut body, chunk| {
                     body.extend_from_slice(&chunk);
                     Ok::<_, hyper::Error>(body)
@@ -433,25 +437,18 @@ impl ProvideAwsCredentials for IamProvider {
 
         //XXX: this is crappy, but this blocks on non-EC2 machines like
         // our mac builders.
-        let timeout = Timeout::new(StdDuration::from_secs(2), &self.handle);
-        let timeout = timeout
-            .into_future()
-            .flatten()
-            .map_err(|_e| "timeout failed".into());
+        let timeout = Timeout::new(creds, StdDuration::from_secs(2));
 
-        Box::new(
-            creds
-                .map(Ok)
-                .select(timeout.map(Err))
-                .then(|result| match result {
-                    Ok((Ok(creds), _timeout)) => Ok(creds),
-                    Ok((Err(_), _creds)) => bail!("took too long to fetch credentials"),
-                    Err((e, _)) => {
-                        warn!("Failed to fetch IAM credentials: {}", e);
-                        Err(e)
-                    }
-                }),
-        )
+        Box::new(timeout.then(|result| match result {
+            Ok(creds) => Ok(creds),
+            Err(err) => match err.into_inner() {
+                None => bail!("took too long to fetch credentials"),
+                Some(e) => {
+                    warn!("Failed to fetch IAM credentials: {}", e);
+                    Err(e)
+                }
+            },
+        }))
     }
 }
 
@@ -499,7 +496,6 @@ impl<P: ProvideAwsCredentials> ProvideAwsCredentials for AutoRefreshingProvider<
 #[derive(Clone)]
 pub struct ChainProvider {
     profile_providers: Vec<ProfileProvider>,
-    handle: Handle,
 }
 
 impl ProvideAwsCredentials for ChainProvider {
@@ -513,11 +509,10 @@ impl ProvideAwsCredentials for ChainProvider {
             let alternate = provider.credentials();
             creds = Box::new(creds.or_else(|_| alternate));
         }
-        let handle = self.handle.clone();
         Box::new(
             creds
                 .or_else(move |_| {
-                    IamProvider::new(&handle).credentials().map(|c| {
+                    IamProvider::new().credentials().map(|c| {
                         debug!("Using AWS credentials from IAM");
                         c
                     })
@@ -532,21 +527,16 @@ impl ProvideAwsCredentials for ChainProvider {
 
 impl ChainProvider {
     /// Create a new `ChainProvider` using a `ProfileProvider` with the default settings.
-    pub fn new(handle: &Handle) -> ChainProvider {
+    pub fn new() -> ChainProvider {
         ChainProvider {
             profile_providers: ProfileProvider::new().into_iter().collect(),
-            handle: handle.clone(),
         }
     }
 
     /// Create a new `ChainProvider` using the provided `ProfileProvider`s.
-    pub fn with_profile_providers(
-        profile_providers: Vec<ProfileProvider>,
-        handle: &Handle,
-    ) -> ChainProvider {
+    pub fn with_profile_providers(profile_providers: Vec<ProfileProvider>) -> ChainProvider {
         ChainProvider {
             profile_providers: profile_providers,
-            handle: handle.clone(),
         }
     }
 }

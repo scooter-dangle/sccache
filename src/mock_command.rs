@@ -55,7 +55,6 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
-use tokio_core::reactor::Handle;
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_process::{self, ChildStderr, ChildStdin, ChildStdout, CommandExt};
 
@@ -126,7 +125,7 @@ pub trait CommandCreator {
     type Cmd: RunCommand;
 
     /// Create a new instance of this type.
-    fn new(handle: &Handle, client: &Client) -> Self;
+    fn new(client: &Client) -> Self;
     /// Create a new object that implements `RunCommand` that can be used
     /// to create a new process.
     fn new_command<S: AsRef<OsStr>>(&mut self, program: S) -> Self::Cmd;
@@ -136,7 +135,7 @@ pub trait CommandCreator {
 pub trait CommandCreatorSync: Clone + 'static {
     type Cmd: RunCommand;
 
-    fn new(handle: &Handle, client: &Client) -> Self;
+    fn new(client: &Client) -> Self;
 
     fn new_command_sync<S: AsRef<OsStr>>(&mut self, program: S) -> Self::Cmd;
 }
@@ -181,15 +180,13 @@ impl CommandChild for Child {
 
 pub struct AsyncCommand {
     inner: Option<Command>,
-    handle: Handle,
     jobserver: Client,
 }
 
 impl AsyncCommand {
-    pub fn new<S: AsRef<OsStr>>(program: S, handle: Handle, jobserver: Client) -> AsyncCommand {
+    pub fn new<S: AsRef<OsStr>>(program: S, jobserver: Client) -> AsyncCommand {
         AsyncCommand {
             inner: Some(Command::new(program)),
-            handle: handle,
             jobserver: jobserver,
         }
     }
@@ -268,10 +265,9 @@ impl RunCommand for AsyncCommand {
         inner.env_remove("MFLAGS");
         inner.env_remove("CARGO_MAKEFLAGS");
         self.jobserver.configure(&mut inner);
-        let handle = self.handle.clone();
         Box::new(self.jobserver.acquire().and_then(move |token| {
             let child = inner
-                .spawn_async_with_handle(handle.new_tokio_handle())
+                .spawn_async()
                 .chain_err(|| format!("failed to spawn {:?}", inner))?;
             Ok(Child {
                 inner: child,
@@ -290,7 +286,6 @@ impl fmt::Debug for AsyncCommand {
 /// Struct to use `RunCommand` with `std::process::Command`.
 #[derive(Clone)]
 pub struct ProcessCommandCreator {
-    handle: Handle,
     jobserver: Client,
 }
 
@@ -298,15 +293,14 @@ pub struct ProcessCommandCreator {
 impl CommandCreator for ProcessCommandCreator {
     type Cmd = AsyncCommand;
 
-    fn new(handle: &Handle, client: &Client) -> ProcessCommandCreator {
+    fn new(client: &Client) -> ProcessCommandCreator {
         ProcessCommandCreator {
-            handle: handle.clone(),
             jobserver: client.clone(),
         }
     }
 
     fn new_command<S: AsRef<OsStr>>(&mut self, program: S) -> AsyncCommand {
-        AsyncCommand::new(program, self.handle.clone(), self.jobserver.clone())
+        AsyncCommand::new(program, self.jobserver.clone())
     }
 }
 
@@ -314,8 +308,8 @@ impl CommandCreator for ProcessCommandCreator {
 impl CommandCreatorSync for ProcessCommandCreator {
     type Cmd = AsyncCommand;
 
-    fn new(handle: &Handle, client: &Client) -> ProcessCommandCreator {
-        CommandCreator::new(handle, client)
+    fn new(client: &Client) -> ProcessCommandCreator {
+        CommandCreator::new(client)
     }
 
     fn new_command_sync<S: AsRef<OsStr>>(&mut self, program: S) -> AsyncCommand {
@@ -523,7 +517,7 @@ impl MockCommandCreator {
 impl CommandCreator for MockCommandCreator {
     type Cmd = MockCommand;
 
-    fn new(_handle: &Handle, _client: &Client) -> MockCommandCreator {
+    fn new(_client: &Client) -> MockCommandCreator {
         MockCommandCreator {
             children: Vec::new(),
         }
@@ -543,8 +537,8 @@ impl CommandCreator for MockCommandCreator {
 impl<T: CommandCreator + 'static> CommandCreatorSync for Arc<Mutex<T>> {
     type Cmd = T::Cmd;
 
-    fn new(handle: &Handle, client: &Client) -> Arc<Mutex<T>> {
-        Arc::new(Mutex::new(T::new(handle, client)))
+    fn new(client: &Client) -> Arc<Mutex<T>> {
+        Arc::new(Mutex::new(T::new(client)))
     }
 
     fn new_command_sync<S: AsRef<OsStr>>(&mut self, program: S) -> T::Cmd {
@@ -563,7 +557,6 @@ mod test {
     use std::sync::{Arc, Mutex};
     use std::thread;
     use test::utils::*;
-    use tokio_core::reactor::Core;
 
     fn spawn_command<T: CommandCreator, S: AsRef<OsStr>>(
         creator: &mut T,
@@ -609,9 +602,8 @@ mod test {
 
     #[test]
     fn test_mock_command_wait() {
-        let core = Core::new().unwrap();
         let client = Client::new_num(1);
-        let mut creator = MockCommandCreator::new(&core.handle(), &client);
+        let mut creator = MockCommandCreator::new(&client);
         creator.next_command_spawns(Ok(MockChild::new(exit_status(0), "hello", "error")));
         assert_eq!(
             0,
@@ -627,17 +619,15 @@ mod test {
     fn test_unexpected_new_command() {
         // If next_command_spawns hasn't been called enough times,
         // new_command should panic.
-        let core = Core::new().unwrap();
         let client = Client::new_num(1);
-        let mut creator = MockCommandCreator::new(&core.handle(), &client);
+        let mut creator = MockCommandCreator::new(&client);
         creator.new_command("foo").spawn().wait().unwrap();
     }
 
     #[test]
     fn test_mock_command_output() {
-        let core = Core::new().unwrap();
         let client = Client::new_num(1);
-        let mut creator = MockCommandCreator::new(&core.handle(), &client);
+        let mut creator = MockCommandCreator::new(&client);
         creator.next_command_spawns(Ok(MockChild::new(exit_status(0), "hello", "error")));
         let output = spawn_output_command(&mut creator, "foo").unwrap();
         assert_eq!(0, output.status.code().unwrap());
@@ -647,9 +637,8 @@ mod test {
 
     #[test]
     fn test_mock_command_calls() {
-        let core = Core::new().unwrap();
         let client = Client::new_num(1);
-        let mut creator = MockCommandCreator::new(&core.handle(), &client);
+        let mut creator = MockCommandCreator::new(&client);
         creator.next_command_calls(|_| Ok(MockChild::new(exit_status(0), "hello", "error")));
         let output = spawn_output_command(&mut creator, "foo").unwrap();
         assert_eq!(0, output.status.code().unwrap());
@@ -659,9 +648,8 @@ mod test {
 
     #[test]
     fn test_mock_spawn_error() {
-        let core = Core::new().unwrap();
         let client = Client::new_num(1);
-        let mut creator = MockCommandCreator::new(&core.handle(), &client);
+        let mut creator = MockCommandCreator::new(&client);
         creator.next_command_spawns(Err("error".into()));
         let e = spawn_command(&mut creator, "foo").err().unwrap();
         assert_eq!("error", e.description());
@@ -669,9 +657,8 @@ mod test {
 
     #[test]
     fn test_mock_wait_error() {
-        let core = Core::new().unwrap();
         let client = Client::new_num(1);
-        let mut creator = MockCommandCreator::new(&core.handle(), &client);
+        let mut creator = MockCommandCreator::new(&client);
         creator.next_command_spawns(Ok(MockChild::with_error(io::Error::new(
             io::ErrorKind::Other,
             "error",
@@ -682,9 +669,8 @@ mod test {
 
     #[test]
     fn test_mock_command_sync() {
-        let core = Core::new().unwrap();
         let client = Client::new_num(1);
-        let creator = Arc::new(Mutex::new(MockCommandCreator::new(&core.handle(), &client)));
+        let creator = Arc::new(Mutex::new(MockCommandCreator::new(&client)));
         next_command(
             &creator,
             Ok(MockChild::new(exit_status(0), "hello", "error")),

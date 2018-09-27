@@ -309,6 +309,92 @@ pub fn ref_env(env: &[(OsString, OsString)]) -> impl Iterator<Item = (&OsString,
     env.iter().map(|&(ref k, ref v)| (k, v))
 }
 
+#[cfg(feature = "hyperx")]
+pub use self::http_extension::{HeadersExt, RequestExt};
+
+#[cfg(feature = "hyperx")]
+mod http_extension {
+    use http;
+    use http::header::HeaderValue;
+    use hyperx;
+    use std::fmt;
+
+    pub trait HeadersExt {
+        fn set<H>(&mut self, header: H)
+        where
+            H: hyperx::header::Header + fmt::Display;
+
+        fn get_hyperx<H>(&self) -> Option<H>
+        where
+            H: hyperx::header::Header;
+    }
+
+    impl HeadersExt for http::HeaderMap {
+        fn set<H>(&mut self, header: H)
+        where
+            H: hyperx::header::Header + fmt::Display,
+        {
+            self.insert(
+                H::header_name(),
+                HeaderValue::from_shared(header.to_string().into()).unwrap(),
+            );
+        }
+
+        fn get_hyperx<H>(&self) -> Option<H>
+        where
+            H: hyperx::header::Header,
+        {
+            http::HeaderMap::get(self, H::header_name())
+                .and_then(|header| H::parse_header(&header.as_bytes().into()).ok())
+        }
+    }
+
+    pub trait RequestExt {
+        fn set_header<H>(self, header: H) -> Self
+        where
+            H: hyperx::header::Header + fmt::Display;
+    }
+
+    impl RequestExt for http::request::Builder {
+        fn set_header<H>(mut self, header: H) -> Self
+        where
+            H: hyperx::header::Header + fmt::Display,
+        {
+            self.header(
+                H::header_name(),
+                HeaderValue::from_shared(header.to_string().into()).unwrap(),
+            );
+            self
+        }
+    }
+
+    #[cfg(feature = "reqwest")]
+    impl RequestExt for ::reqwest::async::RequestBuilder {
+        fn set_header<H>(self, header: H) -> Self
+        where
+            H: hyperx::header::Header + fmt::Display,
+        {
+            self.header(
+                H::header_name(),
+                HeaderValue::from_shared(header.to_string().into()).unwrap(),
+            )
+        }
+    }
+
+    #[cfg(feature = "reqwest")]
+    impl RequestExt for ::reqwest::RequestBuilder {
+        fn set_header<H>(self, header: H) -> Self
+        where
+            H: hyperx::header::Header + fmt::Display,
+        {
+            self.header(
+                H::header_name(),
+                HeaderValue::from_shared(header.to_string().into()).unwrap(),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::OsStrExt;
