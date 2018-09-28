@@ -56,6 +56,7 @@ error_chain! {
         StrFromUtf8(::std::string::FromUtf8Error) #[cfg(feature = "gcs")];
         TempfilePersist(tempfile::PersistError);
         WalkDir(walkdir::Error);
+        Timer(tokio_timer::Error);
     }
 
     errors {

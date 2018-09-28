@@ -240,7 +240,7 @@ fn canonicalize_resource(uri: &Url, account_name: &str) -> String {
 #[cfg(test)]
 mod test {
     use super::*;
-    use tokio_core::reactor::Core;
+    use tokio::runtime::current_thread::Runtime;
 
     #[test]
     fn test_signing() {
@@ -288,15 +288,15 @@ mod test {
         let container_name = Some("sccache".to_owned());
         let creds = AzureCredentials::new(&blob_endpoint, &client_name, &client_key, container_name.clone());
 
-        let mut core = Core::new().unwrap();
+        let mut runtime = Runtime::new().unwrap();
 
         let container = BlobContainer::new(creds.azure_blob_endpoint(), &container_name).unwrap();
 
         let put_future = container.put("foo", "barbell".as_bytes().to_vec(), &creds);
-        core.run(put_future).unwrap();
+        runtime.block_on(put_future).unwrap();
 
         let get_future = container.get("foo", &creds);
-        let result = core.run(get_future).unwrap();
+        let result = runtime.block_on(get_future).unwrap();
 
         assert_eq!("barbell".as_bytes().to_vec(), result);
     }

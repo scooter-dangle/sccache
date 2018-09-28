@@ -28,10 +28,9 @@ use compiler::{
 use config::CONFIG;
 use dist;
 use filetime::FileTime;
-use futures::future;
 use futures::sync::mpsc;
 use futures::task::{self, Task};
-use futures::{Stream, Sink, Async, AsyncSink, Poll, StartSend, Future};
+use futures::{Stream, Sink, Async, AsyncSink, Poll, StartSend, Future, future, stream};
 use futures_cpupool::CpuPool;
 use jobserver::Client;
 use mock_command::{
@@ -53,11 +52,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, Duration};
 use std::u64;
-use tokio_core::reactor::{Core, Handle};
+use tokio;
+use tokio::runtime::current_thread::{Runtime, Handle};
 use tokio_io::codec::length_delimited::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_proto::BindServer;
-use tokio_proto::streaming::pipeline::{Frame, ServerProto, Transport};
+use tokio_proto::streaming::pipeline::{Frame, Transport};
 use tokio_proto::streaming::{Body, Message};
 use tokio_serde_bincode::{ReadBincode, WriteBincode};
 use tokio_service::Service;
@@ -135,7 +134,7 @@ fn get_signal(_status: ExitStatus) -> i32 {
 pub fn start_server(port: u16) -> Result<()> {
     info!("start_server: port: {}", port);
     let client = unsafe { Client::new() };
-    let core = Core::new()?;
+    let runtime = Runtime::new()?;
     let pool = CpuPool::new(20);
     let dist_client: Arc<dist::Client> = match CONFIG.dist.scheduler_addr {
         #[cfg(feature = "dist-client")]
@@ -161,7 +160,7 @@ pub fn start_server(port: u16) -> Result<()> {
         },
     };
     let storage = storage_from_config(&pool);
-    let res = SccacheServer::<ProcessCommandCreator>::new(port, pool, core, client, dist_client, storage);
+    let res = SccacheServer::<ProcessCommandCreator>::new(port, pool, runtime, client, dist_client, storage);
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
     match res {
         Ok(srv) => {
@@ -181,7 +180,7 @@ pub fn start_server(port: u16) -> Result<()> {
 }
 
 pub struct SccacheServer<C: CommandCreatorSync> {
-    core: Core,
+    runtime: Runtime,
     listener: TcpListener,
     rx: mpsc::Receiver<ServerMessage>,
     timeout: Duration,
@@ -192,7 +191,7 @@ pub struct SccacheServer<C: CommandCreatorSync> {
 impl<C: CommandCreatorSync> SccacheServer<C> {
     pub fn new(port: u16,
                pool: CpuPool,
-               core: Core,
+               runtime: Runtime,
                client: Client,
                dist_client: Arc<dist::Client>,
                storage: Arc<Storage>) -> Result<SccacheServer<C>> {
@@ -205,14 +204,14 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         let (wait, info) = WaitUntilZero::new();
         let service = SccacheService::new(dist_client,
                                           storage,
-                                          core.handle(),
+                                          runtime.handle(),
                                           &client,
                                           pool,
                                           tx,
                                           info);
 
         Ok(SccacheServer {
-            core: core,
+            runtime: runtime,
             listener: listener,
             rx: rx,
             service: service,
@@ -265,14 +264,44 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
     fn _run<'a>(self, shutdown: Box<Future<Item = (), Error = ()> + 'a>)
                 -> io::Result<()>
     {
-        let SccacheServer { mut core, listener, rx, service, timeout, wait } = self;
+        let SccacheServer { mut runtime, listener, rx, service, timeout, wait } = self;
 
         // Create our "server future" which will simply handle all incoming
         // connections in separate tasks.
-        let handle = core.handle();
         let server = listener.incoming().for_each(move |socket| {
             trace!("incoming connection");
-            SccacheProto.bind_server(&handle, socket, service.clone());
+
+            let (sink, stream) = SccacheTransport {
+                inner: WriteBincode::new(ReadBincode::new(Framed::new(socket))),
+            }.split();
+            let sink = sink.sink_from_err::<Error>();
+
+            let service = service.clone();
+
+            tokio::runtime::current_thread::TaskExecutor::current().spawn_local(Box::new(
+                stream
+                    .from_err::<Error>()
+                    .and_then(move |input| service.call(input))
+                    .and_then(|message| {
+                        let f: Box<Stream<Item = _, Error = _>> = match message {
+                            Message::WithoutBody(message) => Box::new(stream::once(Ok(Frame::Message { message, body: false }))),
+                            Message::WithBody(message, body) => {
+                                Box::new(
+                                    stream::once(Ok(Frame::Message { message, body: true }))
+                                        .chain(body.map(|chunk| Frame::Body { chunk: Some(chunk) }))
+                                        .chain(stream::once(Ok(Frame::Body { chunk: None })))
+                                )
+                            }
+                        };
+                        Ok(f.from_err::<Error>())
+                    })
+                    .flatten()
+                    .forward(sink)
+                    .map(|_| ())
+                    .map_err(|err| {
+                        error!("{}", err);
+                    })
+            )).unwrap();
             Ok(())
         });
 
@@ -315,7 +344,7 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         })));
 
         let server = future::select_all(futures);
-        core.run(server)
+        runtime.block_on(server)
             .map_err(|p| p.0)?;
 
         info!("moving into the shutdown phase now, waiting at most 10 seconds \
@@ -328,7 +357,7 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         //
         // Note that we cap the amount of time this can take, however, as we
         // don't want to wait *too* long.
-        core.run(Timeout::new(wait, Duration::new(10, 0)))
+        runtime.block_on(Timeout::new(wait, Duration::new(10, 0)))
             .map_err(|e| if e.is_inner() {
                 e.into_inner().unwrap()
             } else {
@@ -457,7 +486,7 @@ impl<C> SccacheService<C>
             storage: storage,
             compilers: Rc::new(RefCell::new(HashMap::new())),
             pool: pool,
-            creator: C::new(&handle, client),
+            creator: C::new(client),
             handle: handle,
             tx: tx,
             info: info,
@@ -723,7 +752,9 @@ impl<C> SccacheService<C>
             send.join(cache_write).then(|_| Ok(()))
         });
 
-        self.handle.spawn(task);
+        tokio::runtime::current_thread::TaskExecutor::current()
+            .spawn_local(Box::new(task))
+            .unwrap();
     }
 }
 
@@ -872,27 +903,6 @@ impl ServerInfo {
     }
 }
 
-/// tokio-proto protocol implementation for sccache
-struct SccacheProto;
-
-impl<I> ServerProto<I> for SccacheProto
-    where I: AsyncRead + AsyncWrite + 'static,
-{
-    type Request = Request;
-    type RequestBody = ();
-    type Response = Response;
-    type ResponseBody = Response;
-    type Error = Error;
-    type Transport = SccacheTransport<I>;
-    type BindTransport = future::FutureResult<Self::Transport, io::Error>;
-
-    fn bind_transport(&self, io: I) -> Self::BindTransport {
-        future::ok(SccacheTransport {
-            inner: WriteBincode::new(ReadBincode::new(Framed::new(io))),
-        })
-    }
-}
-
 /// Implementation of `Stream + Sink` that tokio-proto is expecting
 ///
 /// This type is composed of a few layers:
@@ -913,7 +923,7 @@ struct SccacheTransport<I: AsyncRead + AsyncWrite> {
 }
 
 impl<I: AsyncRead + AsyncWrite> Stream for SccacheTransport<I> {
-    type Item = Frame<Request, (), Error>;
+    type Item = Message<Request, Body<(), Error>>;
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, io::Error> {
@@ -922,10 +932,7 @@ impl<I: AsyncRead + AsyncWrite> Stream for SccacheTransport<I> {
             io::Error::new(io::ErrorKind::Other, e)
         }));
         Ok(msg.map(|m| {
-            Frame::Message {
-                message: m,
-                body: false,
-            }
+            Message::WithoutBody(m)
         }).into())
     }
 }

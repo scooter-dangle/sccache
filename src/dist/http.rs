@@ -580,7 +580,6 @@ mod client {
     use std::path::Path;
     use std::time::Duration;
     use super::super::cache;
-    use tokio_core;
 
     use dist::{
         self,
