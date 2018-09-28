@@ -4,7 +4,7 @@
 
 use chrono::{offset, DateTime, Duration};
 use futures::future::{self, Shared};
-use futures::{Async, Future, IntoFuture, Stream};
+use futures::{Async, Future, Stream};
 use hyper::client::{HttpConnector};
 use hyperx::header::Connection;
 use hyper::{self, Client, Request};
@@ -22,7 +22,7 @@ use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
-use tokio_core::reactor::{Handle, Timeout};
+use tokio_timer::Timeout;
 
 use errors::*;
 use util::RequestExt;
@@ -298,14 +298,12 @@ fn parse_credentials_file(file_path: &Path) -> Result<HashMap<String, AwsCredent
 /// Provides AWS credentials from a resource's IAM role.
 pub struct IamProvider {
     client: Client<HttpConnector>,
-    handle: Handle,
 }
 
 impl IamProvider {
-    pub fn new(handle: &Handle) -> IamProvider {
+    pub fn new() -> IamProvider {
         IamProvider {
             client: Client::new(),
-            handle: handle.clone(),
         }
     }
 
@@ -443,22 +441,20 @@ impl ProvideAwsCredentials for IamProvider {
 
         //XXX: this is crappy, but this blocks on non-EC2 machines like
         // our mac builders.
-        let timeout = Timeout::new(StdDuration::from_secs(2), &self.handle);
-        let timeout = timeout
-            .into_future()
-            .flatten()
-            .map_err(|_e| "timeout failed".into());
+        let timeout = Timeout::new(creds, StdDuration::from_secs(2));
 
         Box::new(
-            creds
-                .map(Ok)
-                .select(timeout.map(Err))
+            timeout
                 .then(|result| match result {
-                    Ok((Ok(creds), _timeout)) => Ok(creds),
-                    Ok((Err(_), _creds)) => bail!("took too long to fetch credentials"),
-                    Err((e, _)) => {
-                        warn!("Failed to fetch IAM credentials: {}", e);
-                        Err(e)
+                    Ok(creds) => Ok(creds),
+                    Err(err) => {
+                        match err.into_inner() {
+                            None => bail!("took too long to fetch credentials"),
+                            Some(e) => {
+                                warn!("Failed to fetch IAM credentials: {}", e);
+                                Err(e)
+                            }
+                        }
                     }
                 }),
         )
@@ -509,7 +505,6 @@ impl<P: ProvideAwsCredentials> ProvideAwsCredentials for AutoRefreshingProvider<
 #[derive(Clone)]
 pub struct ChainProvider {
     profile_providers: Vec<ProfileProvider>,
-    handle: Handle,
 }
 
 impl ProvideAwsCredentials for ChainProvider {
@@ -523,11 +518,10 @@ impl ProvideAwsCredentials for ChainProvider {
             let alternate = provider.credentials();
             creds = Box::new(creds.or_else(|_| alternate));
         }
-        let handle = self.handle.clone();
         Box::new(
             creds
                 .or_else(move |_| {
-                    IamProvider::new(&handle).credentials().map(|c| {
+                    IamProvider::new().credentials().map(|c| {
                         debug!("Using AWS credentials from IAM");
                         c
                     })
@@ -541,21 +535,18 @@ impl ProvideAwsCredentials for ChainProvider {
 
 impl ChainProvider {
     /// Create a new `ChainProvider` using a `ProfileProvider` with the default settings.
-    pub fn new(handle: &Handle) -> ChainProvider {
+    pub fn new() -> ChainProvider {
         ChainProvider {
             profile_providers: ProfileProvider::new().into_iter().collect(),
-            handle: handle.clone(),
         }
     }
 
     /// Create a new `ChainProvider` using the provided `ProfileProvider`s.
     pub fn with_profile_providers(
         profile_providers: Vec<ProfileProvider>,
-        handle: &Handle,
     ) -> ChainProvider {
         ChainProvider {
             profile_providers: profile_providers,
-            handle: handle.clone(),
         }
     }
 }

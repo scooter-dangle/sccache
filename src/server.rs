@@ -51,10 +51,9 @@ use std::path::PathBuf;
 use std::process::{Output, ExitStatus};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Instant, Duration};
 use std::u64;
-use tokio_core::net::TcpListener;
-use tokio_core::reactor::{Handle, Core, Timeout};
+use tokio_core::reactor::{Core, Handle};
 use tokio_io::codec::length_delimited::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_proto::BindServer;
@@ -62,6 +61,8 @@ use tokio_proto::streaming::pipeline::{Frame, ServerProto, Transport};
 use tokio_proto::streaming::{Body, Message};
 use tokio_serde_bincode::{ReadBincode, WriteBincode};
 use tokio_service::Service;
+use tokio_tcp::TcpListener;
+use tokio_timer::{Delay, Timeout};
 use util; //::fmt_duration_as_secs;
 
 use errors::*;
@@ -141,7 +142,6 @@ pub fn start_server(port: u16) -> Result<()> {
         Some(addr) => {
             info!("Enabling distributed sccache to {}", addr);
             Arc::new(dist::http::Client::new(
-                &core.handle(),
                 &pool,
                 addr,
                 &CONFIG.dist.cache_dir.join("client"),
@@ -160,7 +160,7 @@ pub fn start_server(port: u16) -> Result<()> {
             Arc::new(dist::NoopClient)
         },
     };
-    let storage = storage_from_config(&pool, &core.handle());
+    let storage = storage_from_config(&pool);
     let res = SccacheServer::<ProcessCommandCreator>::new(port, pool, core, client, dist_client, storage);
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
     match res {
@@ -196,9 +196,8 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
                client: Client,
                dist_client: Arc<dist::Client>,
                storage: Arc<Storage>) -> Result<SccacheServer<C>> {
-        let handle = core.handle();
         let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port);
-        let listener = TcpListener::bind(&SocketAddr::V4(addr), &handle)?;
+        let listener = TcpListener::bind(&SocketAddr::V4(addr))?;
 
         // Prepare the service which we'll use to service all incoming TCP
         // connections.
@@ -271,7 +270,7 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         // Create our "server future" which will simply handle all incoming
         // connections in separate tasks.
         let handle = core.handle();
-        let server = listener.incoming().for_each(move |(socket, _addr)| {
+        let server = listener.incoming().for_each(move |socket| {
             trace!("incoming connection");
             SccacheProto.bind_server(&handle, socket, service.clone());
             Ok(())
@@ -288,7 +287,6 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         // The `ShutdownOrInactive` indicates the RPC or the period of
         // inactivity, and this is then select'd with the `shutdown` future
         // passed to this function.
-        let handle = core.handle();
 
         let shutdown = shutdown.map(|a| {
             info!("shutting down due to explicit signal");
@@ -305,11 +303,10 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         let shutdown_idle = ShutdownOrInactive {
             rx: rx,
             timeout: if timeout != Duration::new(0, 0) {
-                Some(Timeout::new(timeout, &handle)?)
+                Some(Delay::new(Instant::now() + timeout))
             } else {
                 None
             },
-            handle: handle.clone(),
             timeout_dur: timeout,
         };
         futures.push(Box::new(shutdown_idle.map(|a| {
@@ -331,8 +328,12 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         //
         // Note that we cap the amount of time this can take, however, as we
         // don't want to wait *too* long.
-        core.run(wait.select(Timeout::new(Duration::new(10, 0), &handle)?))
-            .map_err(|p| p.0)?;
+        core.run(Timeout::new(wait, Duration::new(10, 0)))
+            .map_err(|e| if e.is_inner() {
+                e.into_inner().unwrap()
+            } else {
+                io::Error::new(io::ErrorKind::Other, e)
+            })?;
 
         info!("ok, fully shutting down now");
 
@@ -618,8 +619,7 @@ impl<C> SccacheService<C>
                                                   cwd,
                                                   env_vars,
                                                   cache_control,
-                                                  self.pool.clone(),
-                                                  self.handle.clone());
+                                                  self.pool.clone());
         let me = self.clone();
         let task = result.then(move |result| {
             let mut cache_write = None;
@@ -982,8 +982,7 @@ impl<I: AsyncRead + AsyncWrite + 'static> Transport for SccacheTransport<I> {}
 
 struct ShutdownOrInactive {
     rx: mpsc::Receiver<ServerMessage>,
-    handle: Handle,
-    timeout: Option<Timeout>,
+    timeout: Option<Delay>,
     timeout_dur: Duration,
 }
 
@@ -999,7 +998,7 @@ impl Future for ShutdownOrInactive {
                 Async::Ready(Some(ServerMessage::Shutdown)) => return Ok(().into()),
                 Async::Ready(Some(ServerMessage::Request)) => {
                     if self.timeout_dur != Duration::new(0, 0) {
-                        self.timeout = Some(Timeout::new(self.timeout_dur, &self.handle)?);
+                        self.timeout = Some(Delay::new(Instant::now() + self.timeout_dur));
                     }
                 }
                 // All services have shut down, in theory this isn't possible...
@@ -1008,7 +1007,7 @@ impl Future for ShutdownOrInactive {
         }
         match self.timeout {
             None => Ok(Async::NotReady),
-            Some(ref mut timeout) => timeout.poll(),
+            Some(ref mut timeout) => timeout.poll().map_err(|err| io::Error::new(io::ErrorKind::Other, err)),
         }
     }
 }

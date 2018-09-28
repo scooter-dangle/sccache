@@ -26,7 +26,7 @@ use compiler::rust::Rust;
 use dist;
 #[cfg(feature = "dist-client")]
 use dist::pkg;
-use futures::{Future, IntoFuture};
+use futures::Future;
 use futures_cpupool::CpuPool;
 use mock_command::{
     CommandChild,
@@ -53,7 +53,7 @@ use std::time::{
 use tempdir::TempDir;
 use tempfile::NamedTempFile;
 use util::{fmt_duration_as_secs, ref_env, run_input_output};
-use tokio_core::reactor::{Handle, Timeout};
+use tokio_timer::Timeout;
 
 use errors::*;
 
@@ -133,8 +133,7 @@ pub trait CompilerHasher<T>: fmt::Debug + Send + 'static
                              cwd: PathBuf,
                              env_vars: Vec<(OsString, OsString)>,
                              cache_control: CacheControl,
-                             pool: CpuPool,
-                             handle: Handle)
+                             pool: CpuPool)
                              -> SFuture<(CompileResult, process::Output)>
     {
         let out_pretty = self.output_pretty().into_owned();
@@ -163,16 +162,7 @@ pub trait CompilerHasher<T>: fmt::Debug + Send + 'static
             // Set a maximum time limit for the cache to respond before we forge
             // ahead ourselves with a compilation.
             let timeout = Duration::new(60, 0);
-            let timeout = Timeout::new(timeout, &handle).into_future().flatten();
-
-            let cache_status = cache_status.map(Some);
-            let timeout = timeout.map(|_| None).chain_err(|| "timeout error");
-            let cache_status = cache_status.select(timeout).then(|r| {
-                match r {
-                    Ok((e, _other)) => Ok(e),
-                    Err((e, _other)) => Err(e),
-                }
-            });
+            let cache_status = Timeout::new(cache_status, timeout);
 
             // Check the result of the cache lookup.
             Box::new(cache_status.then(move |result| {
@@ -182,7 +172,7 @@ pub trait CompilerHasher<T>: fmt::Debug + Send + 'static
                     .collect::<HashMap<_, _>>();
 
                 let miss_type = match result {
-                    Ok(Some(Cache::Hit(mut entry))) => {
+                    Ok(Cache::Hit(mut entry)) => {
                         debug!("[{}]: Cache hit in {}", out_pretty, fmt_duration_as_secs(&duration));
                         let mut stdout = Vec::new();
                         let mut stderr = Vec::new();
@@ -216,24 +206,28 @@ pub trait CompilerHasher<T>: fmt::Debug + Send + 'static
                             (result, output)
                         })) as SFuture<_>
                     }
-                    Ok(Some(Cache::Miss)) => {
+                    Ok(Cache::Miss) => {
                         debug!("[{}]: Cache miss in {}", out_pretty, fmt_duration_as_secs(&duration));
                         MissType::Normal
                     }
-                    Ok(Some(Cache::Recache)) => {
+                    Ok(Cache::Recache) => {
                         debug!("[{}]: Cache recache in {}", out_pretty, fmt_duration_as_secs(&duration));
                         MissType::ForcedRecache
                     }
-                    Ok(None) => {
-                        debug!("[{}]: Cache timed out {}", out_pretty, fmt_duration_as_secs(&duration));
-                        MissType::TimedOut
-                    }
                     Err(err) => {
-                        error!("[{}]: Cache read error: {}", out_pretty, err);
-                        for e in err.iter().skip(1) {
-                            error!("[{}] \t{}", out_pretty, e);
+                        if err.is_elapsed() {
+                            debug!("[{}]: Cache timed out {}", out_pretty, fmt_duration_as_secs(&duration));
+                            MissType::TimedOut
+                        } else {
+                            error!("[{}]: Cache read error: {}", out_pretty, err);
+                            if err.is_inner() {
+                                let err = err.into_inner().unwrap();
+                                for e in err.iter().skip(1) {
+                                    error!("[{}] \t{}", out_pretty, e);
+                                }
+                            }
+                            MissType::CacheReadError
                         }
-                        MissType::CacheReadError
                     }
                 };
 
@@ -791,7 +785,7 @@ mod test {
     use cache::Storage;
     use cache::disk::DiskCache;
     use dist;
-    use futures::Future;
+    use futures::{future, Future};
     use futures_cpupool::CpuPool;
     use mock_command::*;
     use std::fs::{self,File};
@@ -901,8 +895,7 @@ mod test {
         let creator = new_creator();
         let f = TestFixture::new();
         let pool = CpuPool::new(1);
-        let core = Core::new().unwrap();
-        let handle = core.handle();
+        let mut core = Core::new().unwrap();
         let dist_client = Arc::new(dist::NoopClient);
         let storage = DiskCache::new(&f.tempdir.path().join("cache"),
                                      u64::MAX,
@@ -934,15 +927,18 @@ mod test {
             o @ _ => panic!("Bad result from parse_arguments: {:?}", o),
         };
         let hasher2 = hasher.clone();
-        let (cached, res) = hasher.get_cached_or_compile(dist_client.clone(),
-                                                         creator.clone(),
-                                                         storage.clone(),
-                                                         arguments.clone(),
-                                                         cwd.to_path_buf(),
-                                                         vec![],
-                                                         CacheControl::Default,
-                                                         pool.clone(),
-                                                         handle.clone()).wait().unwrap();
+        let (cached, res) = core.run(future::lazy(|| {
+            hasher.get_cached_or_compile(
+                dist_client.clone(),
+                creator.clone(),
+                storage.clone(),
+                arguments.clone(),
+                cwd.to_path_buf(),
+                vec![],
+                CacheControl::Default,
+                pool.clone()
+            )
+        })).unwrap();
         // Ensure that the object file was created.
         assert_eq!(true, fs::metadata(&obj).and_then(|m| Ok(m.len() > 0)).unwrap());
         match cached {
@@ -960,15 +956,18 @@ mod test {
         // The preprocessor invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "preprocessor output", "")));
         // There should be no actual compiler invocation.
-        let (cached, res) = hasher2.get_cached_or_compile(dist_client.clone(),
-                                                          creator.clone(),
-                                                          storage.clone(),
-                                                          arguments,
-                                                          cwd.to_path_buf(),
-                                                          vec![],
-                                                          CacheControl::Default,
-                                                          pool.clone(),
-                                                          handle).wait().unwrap();
+        let (cached, res) = core.run(future::lazy(|| {
+            hasher2.get_cached_or_compile(
+                dist_client.clone(),
+                creator.clone(),
+                storage.clone(),
+                arguments,
+                cwd.to_path_buf(),
+                vec![],
+                CacheControl::Default,
+                pool.clone()
+            )
+        })).unwrap();
         // Ensure that the object file was created.
         assert_eq!(true, fs::metadata(&obj).and_then(|m| Ok(m.len() > 0)).unwrap());
         assert_eq!(CompileResult::CacheHit(Duration::new(0, 0)), cached);
@@ -984,8 +983,7 @@ mod test {
         let creator = new_creator();
         let f = TestFixture::new();
         let pool = CpuPool::new(1);
-        let core = Core::new().unwrap();
-        let handle = core.handle();
+        let mut core = Core::new().unwrap();
         let dist_client = Arc::new(dist::NoopClient);
         let storage = DiskCache::new(&f.tempdir.path().join("cache"),
                                      u64::MAX,
@@ -1017,15 +1015,18 @@ mod test {
             o @ _ => panic!("Bad result from parse_arguments: {:?}", o),
         };
         let hasher2 = hasher.clone();
-        let (cached, res) = hasher.get_cached_or_compile(dist_client.clone(),
-                                                         creator.clone(),
-                                                         storage.clone(),
-                                                         arguments.clone(),
-                                                         cwd.to_path_buf(),
-                                                         vec![],
-                                                         CacheControl::Default,
-                                                         pool.clone(),
-                                                         handle.clone()).wait().unwrap();
+        let (cached, res) = core.run(future::lazy(|| {
+            hasher.get_cached_or_compile(
+                dist_client.clone(),
+                creator.clone(),
+                storage.clone(),
+                arguments.clone(),
+                cwd.to_path_buf(),
+                vec![],
+                CacheControl::Default,
+                pool.clone(),
+            )
+        })).unwrap();
         // Ensure that the object file was created.
         assert_eq!(true, fs::metadata(&obj).and_then(|m| Ok(m.len() > 0)).unwrap());
         match cached {
@@ -1044,15 +1045,16 @@ mod test {
         // The preprocessor invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "preprocessor output", "")));
         // There should be no actual compiler invocation.
-        let (cached, res) = hasher2.get_cached_or_compile(dist_client.clone(),
-                                                          creator,
-                                                          storage,
-                                                          arguments,
-                                                          cwd.to_path_buf(),
-                                                          vec![],
-                                                          CacheControl::Default,
-                                                          pool,
-                                                          handle).wait().unwrap();
+        let (cached, res) = core.run(future::lazy(|| {
+            hasher2.get_cached_or_compile(dist_client.clone(),
+                creator,
+                storage,
+                arguments,
+                cwd.to_path_buf(),
+                vec![],
+                CacheControl::Default,
+                pool)
+        })).unwrap();
         // Ensure that the object file was created.
         assert_eq!(true, fs::metadata(&obj).and_then(|m| Ok(m.len() > 0)).unwrap());
         assert_eq!(CompileResult::CacheHit(Duration::new(0, 0)), cached);
@@ -1070,8 +1072,7 @@ mod test {
         let creator = new_creator();
         let f = TestFixture::new();
         let pool = CpuPool::new(1);
-        let core = Core::new().unwrap();
-        let handle = core.handle();
+        let mut core = Core::new().unwrap();
         let dist_client = Arc::new(dist::NoopClient);
         let storage = MockStorage::new();
         let storage: Arc<MockStorage> = Arc::new(storage);
@@ -1102,15 +1103,17 @@ mod test {
         };
         // The cache will return an error.
         storage.next_get(f_err("Some Error"));
-        let (cached, res) = hasher.get_cached_or_compile(dist_client.clone(),
-                                                         creator.clone(),
-                                                         storage.clone(),
-                                                         arguments.clone(),
-                                                         cwd.to_path_buf(),
-                                                         vec![],
-                                                         CacheControl::Default,
-                                                         pool.clone(),
-                                                         handle.clone()).wait().unwrap();
+        let (cached, res) = core.run(future::lazy(|| {
+            hasher.get_cached_or_compile(dist_client.clone(),
+                creator.clone(),
+                storage.clone(),
+                arguments.clone(),
+                cwd.to_path_buf(),
+                vec![],
+                CacheControl::Default,
+                pool.clone()
+            )
+        })).unwrap();
         // Ensure that the object file was created.
         assert_eq!(true, fs::metadata(&obj).and_then(|m| Ok(m.len() > 0)).unwrap());
         match cached {
@@ -1133,8 +1136,7 @@ mod test {
         let creator = new_creator();
         let f = TestFixture::new();
         let pool = CpuPool::new(1);
-        let core = Core::new().unwrap();
-        let handle = core.handle();
+        let mut core = Core::new().unwrap();
         let dist_client = Arc::new(dist::NoopClient);
         let storage = DiskCache::new(&f.tempdir.path().join("cache"),
                                      u64::MAX,
@@ -1170,15 +1172,18 @@ mod test {
             o @ _ => panic!("Bad result from parse_arguments: {:?}", o),
         };
         let hasher2 = hasher.clone();
-        let (cached, res) = hasher.get_cached_or_compile(dist_client.clone(),
-                                                         creator.clone(),
-                                                         storage.clone(),
-                                                         arguments.clone(),
-                                                         cwd.to_path_buf(),
-                                                         vec![],
-                                                         CacheControl::Default,
-                                                         pool.clone(),
-                                                         handle.clone()).wait().unwrap();
+        let (cached, res) = core.run(future::lazy(|| {
+            hasher.get_cached_or_compile(
+                dist_client.clone(),
+                creator.clone(),
+                storage.clone(),
+                arguments.clone(),
+                cwd.to_path_buf(),
+                vec![],
+                CacheControl::Default,
+                pool.clone()
+            )
+        })).unwrap();
         // Ensure that the object file was created.
         assert_eq!(true, fs::metadata(&obj).and_then(|m| Ok(m.len() > 0)).unwrap());
         match cached {
@@ -1200,8 +1205,7 @@ mod test {
                                                           cwd.to_path_buf(),
                                                           vec![],
                                                           CacheControl::ForceRecache,
-                                                          pool,
-                                                          handle).wait().unwrap();
+                                                          pool).wait().unwrap();
         // Ensure that the object file was created.
         assert_eq!(true, fs::metadata(&obj).and_then(|m| Ok(m.len() > 0)).unwrap());
         match cached {
@@ -1223,8 +1227,7 @@ mod test {
         let creator = new_creator();
         let f = TestFixture::new();
         let pool = CpuPool::new(1);
-        let core = Core::new().unwrap();
-        let handle = core.handle();
+        let mut core = Core::new().unwrap();
         let dist_client = Arc::new(dist::NoopClient);
         let storage = DiskCache::new(&f.tempdir.path().join("cache"),
                                      u64::MAX,
@@ -1245,15 +1248,17 @@ mod test {
             CompilerArguments::Ok(h) => h,
             o @ _ => panic!("Bad result from parse_arguments: {:?}", o),
         };
-        let (cached, res) = hasher.get_cached_or_compile(dist_client.clone(),
-                                                         creator,
-                                                         storage,
-                                                         arguments,
-                                                         cwd.to_path_buf(),
-                                                         vec![],
-                                                         CacheControl::Default,
-                                                         pool,
-                                                         handle).wait().unwrap();
+        let (cached, res) = core.run(future::lazy(|| {
+            hasher.get_cached_or_compile(dist_client.clone(),
+                creator,
+                storage,
+                arguments,
+                cwd.to_path_buf(),
+                vec![],
+                CacheControl::Default,
+                pool
+            )
+        })).unwrap();
         assert_eq!(cached, CompileResult::Error);
         assert_eq!(exit_status(1), res.status);
         // Shouldn't get anything on stdout, since that would just be preprocessor spew!

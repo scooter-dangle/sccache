@@ -611,7 +611,7 @@ mod client {
     }
 
     impl Client {
-        pub fn new(handle: &tokio_core::reactor::Handle, pool: &CpuPool, scheduler_addr: IpAddr, cache_dir: &Path, cache_size: u64, custom_toolchains: &[config::DistCustomToolchain], auth: &'static config::DistAuth) -> Self {
+        pub fn new(pool: &CpuPool, scheduler_addr: IpAddr, cache_dir: &Path, cache_size: u64, custom_toolchains: &[config::DistCustomToolchain], auth: &'static config::DistAuth) -> Self {
             let timeout = Duration::new(REQUEST_TIMEOUT_SECS, 0);
             let client = reqwest::ClientBuilder::new().timeout(timeout).build().unwrap();
             let client_async = reqwest::async::ClientBuilder::new().timeout(timeout).build().unwrap();

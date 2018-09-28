@@ -18,7 +18,6 @@ use reqwest;
 use reqwest::async::{Client, Request};
 use simples3::credential::*;
 use time;
-use tokio_core::reactor::Handle;
 
 use errors::*;
 use util::HeadersExt;
@@ -73,7 +72,7 @@ impl fmt::Display for Bucket {
 }
 
 impl Bucket {
-    pub fn new(name: &str, endpoint: &str, ssl: Ssl, handle: &Handle) -> Result<Bucket> {
+    pub fn new(name: &str, endpoint: &str, ssl: Ssl) -> Result<Bucket> {
         let base_url = base_url(&endpoint, ssl);
         Ok(Bucket {
             name: name.to_owned(),

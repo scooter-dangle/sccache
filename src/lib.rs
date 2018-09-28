@@ -85,12 +85,15 @@ extern crate tar;
 extern crate tempdir;
 extern crate tempfile;
 extern crate time;
+extern crate tokio;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_process;
 extern crate tokio_proto;
 extern crate tokio_serde_bincode;
 extern crate tokio_service;
+extern crate tokio_tcp;
+extern crate tokio_timer;
 extern crate toml;
 #[cfg(any(feature = "gcs", feature = "azure"))]
 extern crate url;

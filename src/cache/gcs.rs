@@ -35,7 +35,6 @@ use reqwest::async::{Request, Client};
 use jwt;
 use openssl;
 use serde_json;
-use tokio_core::reactor::Handle;
 use url::form_urlencoded;
 use url::percent_encoding::{percent_encode, PATH_SEGMENT_ENCODE_SET, QUERY_ENCODE_SET};
 
@@ -55,7 +54,7 @@ impl fmt::Display for Bucket {
 }
 
 impl Bucket {
-    pub fn new(name: String, handle: &Handle) -> Result<Bucket> {
+    pub fn new(name: String) -> Result<Bucket> {
         let client = Client::new();
 
         Ok(Bucket { name, client })
@@ -322,11 +321,10 @@ impl GCSCache {
     /// Create a new `GCSCache` storing data in `bucket`
     pub fn new(bucket: String,
                credential_provider: Option<GCSCredentialProvider>,
-               rw_mode: RWMode,
-               handle: &Handle) -> Result<GCSCache>
+               rw_mode: RWMode) -> Result<GCSCache>
     {
         Ok(GCSCache {
-            bucket: Rc::new(Bucket::new(bucket, handle)?),
+            bucket: Rc::new(Bucket::new(bucket)?),
             rw_mode: rw_mode,
             credential_provider: credential_provider,
         })

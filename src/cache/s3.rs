@@ -32,7 +32,6 @@ use std::env;
 use std::io;
 use std::rc::Rc;
 use std::time::{Instant, Duration};
-use tokio_core::reactor::Handle;
 
 use errors::*;
 
@@ -46,7 +45,7 @@ pub struct S3Cache {
 
 impl S3Cache {
     /// Create a new `S3Cache` storing data in `bucket`.
-    pub fn new(bucket: &str, endpoint: &str, handle: &Handle) -> Result<S3Cache> {
+    pub fn new(bucket: &str, endpoint: &str) -> Result<S3Cache> {
         let home = env::home_dir().ok_or("Couldn't find home directory")?;
         let profile_providers = vec![
             ProfileProvider::with_configuration(home.join(".aws").join("credentials"), "default"),
@@ -55,9 +54,9 @@ impl S3Cache {
             // or make those builders put their credentials in ~/.aws/credentials
             ProfileProvider::with_configuration(home.join(".boto"), "Credentials"),
         ];
-        let provider = AutoRefreshingProvider::new(ChainProvider::with_profile_providers(profile_providers, handle));
+        let provider = AutoRefreshingProvider::new(ChainProvider::with_profile_providers(profile_providers));
         //TODO: configurable SSL
-        let bucket = Rc::new(Bucket::new(bucket, endpoint, Ssl::No, handle)?);
+        let bucket = Rc::new(Bucket::new(bucket, endpoint, Ssl::No)?);
         Ok(S3Cache {
             bucket: bucket,
             provider: provider,
