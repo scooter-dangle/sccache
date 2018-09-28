@@ -683,7 +683,6 @@ mod client {
 
     impl Client {
         pub fn new(
-            handle: &tokio_core::reactor::Handle,
             pool: &CpuPool,
             scheduler_addr: IpAddr,
             cache_dir: &Path,

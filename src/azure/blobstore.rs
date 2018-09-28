@@ -30,7 +30,6 @@ use reqwest::async::{Request, Client};
 use std::fmt;
 use std::str::FromStr;
 use time;
-use tokio_core::reactor::Handle;
 
 use errors::*;
 use util::HeadersExt;
@@ -70,7 +69,7 @@ impl fmt::Display for BlobContainer {
 }
 
 impl BlobContainer {
-    pub fn new(base_url: &str, container_name: &Option<String>, handle: &Handle) -> Result<BlobContainer> {
+    pub fn new(base_url: &str, container_name: &Option<String>) -> Result<BlobContainer> {
         let container_url = match container_name {
             &Some(ref name) => format!("{}{}/", base_url, name), // base_url is assumed to end in a trailing slash
             &None           => base_url.to_owned()
@@ -290,9 +289,8 @@ mod test {
         let creds = AzureCredentials::new(&blob_endpoint, &client_name, &client_key, container_name.clone());
 
         let mut core = Core::new().unwrap();
-        let handle = core.handle();
 
-        let container = BlobContainer::new(creds.azure_blob_endpoint(), &container_name, &handle).unwrap();
+        let container = BlobContainer::new(creds.azure_blob_endpoint(), &container_name).unwrap();
 
         let put_future = container.put("foo", "barbell".as_bytes().to_vec(), &creds);
         core.run(put_future).unwrap();

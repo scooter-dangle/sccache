@@ -38,7 +38,6 @@ use std::io::{
 use std::fs::File;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_core::reactor::Handle;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 use zip::write::FileOptions;
 
@@ -165,13 +164,13 @@ pub trait Storage {
 }
 
 /// Get a suitable `Storage` implementation from configuration.
-pub fn storage_from_config(pool: &CpuPool, _handle: &Handle) -> Arc<Storage> {
+pub fn storage_from_config(pool: &CpuPool) -> Arc<Storage> {
     for cache_type in CONFIG.caches.iter() {
         match *cache_type {
             CacheType::Azure(config::AzureCacheConfig) => {
                 debug!("Trying Azure Blob Store account");
                 #[cfg(feature = "azure")]
-                match AzureBlobCache::new(_handle) {
+                match AzureBlobCache::new() {
                     Ok(storage) => {
                         trace!("Using AzureBlobCache");
                         return Arc::new(storage);
@@ -215,7 +214,7 @@ pub fn storage_from_config(pool: &CpuPool, _handle: &Handle) -> Arc<Storage> {
                         service_account_key_opt.map(|path|
                             GCSCredentialProvider::new(gcs_read_write_mode, path));
 
-                    match GCSCache::new(bucket.to_owned(), gcs_cred_provider, gcs_read_write_mode, _handle) {
+                    match GCSCache::new(bucket.to_owned(), gcs_cred_provider, gcs_read_write_mode) {
                         Ok(s) => {
                             trace!("Using GCSCache");
                             return Arc::new(s);
@@ -249,7 +248,7 @@ pub fn storage_from_config(pool: &CpuPool, _handle: &Handle) -> Arc<Storage> {
             CacheType::S3(config::S3CacheConfig { ref bucket, ref endpoint }) => {
                 debug!("Trying S3Cache({}, {})", bucket, endpoint);
                 #[cfg(feature = "s3")]
-                match S3Cache::new(&bucket, &endpoint, _handle) {
+                match S3Cache::new(&bucket, &endpoint) {
                     Ok(s) => {
                         trace!("Using S3Cache");
                         return Arc::new(s);
