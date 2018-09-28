@@ -88,7 +88,6 @@ extern crate tempdir;
 extern crate tempfile;
 extern crate time;
 extern crate tokio;
-extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_process;
 extern crate tokio_proto;

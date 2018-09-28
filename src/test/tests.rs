@@ -46,7 +46,7 @@ use std::thread;
 use std::time::Duration;
 use std::u64;
 use test::utils::*;
-use tokio_core::reactor::Core;
+use tokio::runtime::current_thread::Runtime;
 
 /// Options for running the server in tests.
 #[derive(Default)]
@@ -84,9 +84,9 @@ fn run_server_thread<T>(cache_dir: &Path, options: T)
     let (tx, rx) = mpsc::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let handle = thread::spawn(move || {
-        let core = Core::new().unwrap();
+        let runtime = Runtime::new().unwrap();
         let client = unsafe { Client::new() };
-        let srv = SccacheServer::new(0, pool, core, client, dist_client, storage).unwrap();
+        let srv = SccacheServer::new(0, pool, runtime, client, dist_client, storage).unwrap();
         let mut srv: SccacheServer<Arc<Mutex<MockCommandCreator>>> = srv;
         assert!(srv.port() > 0);
         if let Some(options) = options {
@@ -183,8 +183,8 @@ fn test_server_unsupported_compiler() {
     let mut stdout = Cursor::new(Vec::new());
     let mut stderr = Cursor::new(Vec::new());
     let path = Some(f.paths);
-    let mut core = Core::new().unwrap();
-    let res = do_compile(client_creator.clone(), &mut core, conn, exe, cmdline, cwd, path, vec![],
+    let mut runtime = Runtime::new().unwrap();
+    let res = do_compile(client_creator.clone(), &mut runtime, conn, exe, cmdline, cwd, path, vec![],
                          &mut stdout, &mut stderr);
     match res {
         Ok(_) => panic!("do_compile should have failed!"),
@@ -239,8 +239,8 @@ fn test_server_compile() {
     let mut stdout = Cursor::new(Vec::new());
     let mut stderr = Cursor::new(Vec::new());
     let path = Some(f.paths);
-    let mut core = Core::new().unwrap();
-    assert_eq!(0, do_compile(client_creator.clone(), &mut core, conn, exe, cmdline, cwd, path, vec![], &mut stdout, &mut stderr).unwrap());
+    let mut runtime = Runtime::new().unwrap();
+    assert_eq!(0, do_compile(client_creator.clone(), &mut runtime, conn, exe, cmdline, cwd, path, vec![], &mut stdout, &mut stderr).unwrap());
     // Make sure we ran the mock processes.
     assert_eq!(0, server_creator.lock().unwrap().children.len());
     assert_eq!(STDOUT, stdout.into_inner().as_slice());

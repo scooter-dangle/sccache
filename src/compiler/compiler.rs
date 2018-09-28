@@ -819,7 +819,7 @@ mod test {
     use std::u64;
     use test::mock_storage::MockStorage;
     use test::utils::*;
-    use tokio_core::reactor::Core;
+    use tokio::runtime::current_thread::Runtime;
 
     #[test]
     fn test_detect_compiler_kind_gcc() {
@@ -926,7 +926,7 @@ LLVM version: 6.0", "")));
         let creator = new_creator();
         let f = TestFixture::new();
         let pool = CpuPool::new(1);
-        let mut core = Core::new().unwrap();
+        let mut runtime = Runtime::new().unwrap();
         let dist_client = Arc::new(dist::NoopClient);
         let storage = DiskCache::new(&f.tempdir.path().join("cache"),
                                      u64::MAX,
@@ -958,7 +958,7 @@ LLVM version: 6.0", "")));
             o @ _ => panic!("Bad result from parse_arguments: {:?}", o),
         };
         let hasher2 = hasher.clone();
-        let (cached, res) = core.run(future::lazy(|| {
+        let (cached, res) = runtime.block_on(future::lazy(|| {
             hasher.get_cached_or_compile(
                 dist_client.clone(),
                 creator.clone(),
@@ -987,7 +987,7 @@ LLVM version: 6.0", "")));
         // The preprocessor invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "preprocessor output", "")));
         // There should be no actual compiler invocation.
-        let (cached, res) = core.run(future::lazy(|| {
+        let (cached, res) = runtime.block_on(future::lazy(|| {
             hasher2.get_cached_or_compile(
                 dist_client.clone(),
                 creator.clone(),
@@ -1014,7 +1014,7 @@ LLVM version: 6.0", "")));
         let creator = new_creator();
         let f = TestFixture::new();
         let pool = CpuPool::new(1);
-        let mut core = Core::new().unwrap();
+        let mut runtime = Runtime::new().unwrap();
         let dist_client = Arc::new(dist::NoopClient);
         let storage = DiskCache::new(&f.tempdir.path().join("cache"),
                                      u64::MAX,
@@ -1046,7 +1046,7 @@ LLVM version: 6.0", "")));
             o @ _ => panic!("Bad result from parse_arguments: {:?}", o),
         };
         let hasher2 = hasher.clone();
-        let (cached, res) = core.run(future::lazy(|| {
+        let (cached, res) = runtime.block_on(future::lazy(|| {
             hasher.get_cached_or_compile(
                 dist_client.clone(),
                 creator.clone(),
@@ -1076,7 +1076,7 @@ LLVM version: 6.0", "")));
         // The preprocessor invocation.
         next_command(&creator, Ok(MockChild::new(exit_status(0), "preprocessor output", "")));
         // There should be no actual compiler invocation.
-        let (cached, res) = core.run(future::lazy(|| {
+        let (cached, res) = runtime.block_on(future::lazy(|| {
             hasher2.get_cached_or_compile(dist_client.clone(),
                 creator,
                 storage,
@@ -1103,7 +1103,7 @@ LLVM version: 6.0", "")));
         let creator = new_creator();
         let f = TestFixture::new();
         let pool = CpuPool::new(1);
-        let mut core = Core::new().unwrap();
+        let mut runtime = Runtime::new().unwrap();
         let dist_client = Arc::new(dist::NoopClient);
         let storage = MockStorage::new();
         let storage: Arc<MockStorage> = Arc::new(storage);
@@ -1134,7 +1134,7 @@ LLVM version: 6.0", "")));
         };
         // The cache will return an error.
         storage.next_get(f_err("Some Error"));
-        let (cached, res) = core.run(future::lazy(|| {
+        let (cached, res) = runtime.block_on(future::lazy(|| {
             hasher.get_cached_or_compile(dist_client.clone(),
                 creator.clone(),
                 storage.clone(),
@@ -1167,7 +1167,7 @@ LLVM version: 6.0", "")));
         let creator = new_creator();
         let f = TestFixture::new();
         let pool = CpuPool::new(1);
-        let mut core = Core::new().unwrap();
+        let mut runtime = Runtime::new().unwrap();
         let dist_client = Arc::new(dist::NoopClient);
         let storage = DiskCache::new(&f.tempdir.path().join("cache"),
                                      u64::MAX,
@@ -1203,7 +1203,7 @@ LLVM version: 6.0", "")));
             o @ _ => panic!("Bad result from parse_arguments: {:?}", o),
         };
         let hasher2 = hasher.clone();
-        let (cached, res) = core.run(future::lazy(|| {
+        let (cached, res) = runtime.block_on(future::lazy(|| {
             hasher.get_cached_or_compile(
                 dist_client.clone(),
                 creator.clone(),
@@ -1258,7 +1258,7 @@ LLVM version: 6.0", "")));
         let creator = new_creator();
         let f = TestFixture::new();
         let pool = CpuPool::new(1);
-        let mut core = Core::new().unwrap();
+        let mut runtime = Runtime::new().unwrap();
         let dist_client = Arc::new(dist::NoopClient);
         let storage = DiskCache::new(&f.tempdir.path().join("cache"),
                                      u64::MAX,
@@ -1279,8 +1279,9 @@ LLVM version: 6.0", "")));
             CompilerArguments::Ok(h) => h,
             o @ _ => panic!("Bad result from parse_arguments: {:?}", o),
         };
-        let (cached, res) = core.run(future::lazy(|| {
-            hasher.get_cached_or_compile(dist_client.clone(),
+        let (cached, res) = runtime.block_on(future::lazy(|| {
+            hasher.get_cached_or_compile(
+                dist_client.clone(),
                 creator,
                 storage,
                 arguments,

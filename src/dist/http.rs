@@ -657,7 +657,6 @@ mod client {
     use std::net::{IpAddr, SocketAddr};
     use std::path::Path;
     use std::time::Duration;
-    use tokio_core;
 
     use super::common::{
         bincode_req, bincode_req_fut, Cfg, ReqwestRequestBuilderExt, RunJobHttpRequest,
