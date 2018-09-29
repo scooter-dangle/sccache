@@ -18,6 +18,7 @@ use cache::{
     CacheWrite,
     Storage,
 };
+use dirs::home_dir;
 use futures::future;
 use futures::future::Future;
 use simples3::{
@@ -28,7 +29,6 @@ use simples3::{
     ProvideAwsCredentials,
     Ssl,
 };
-use std::env;
 use std::io;
 use std::rc::Rc;
 use std::time::{Instant, Duration};
@@ -46,7 +46,7 @@ pub struct S3Cache {
 impl S3Cache {
     /// Create a new `S3Cache` storing data in `bucket`.
     pub fn new(bucket: &str, endpoint: &str) -> Result<S3Cache> {
-        let home = env::home_dir().ok_or("Couldn't find home directory")?;
+        let home = home_dir().ok_or("Couldn't find home directory")?;
         let profile_providers = vec![
             ProfileProvider::with_configuration(home.join(".aws").join("credentials"), "default"),
             //TODO: this is hacky, this is where our mac builders store their

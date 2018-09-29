@@ -30,6 +30,7 @@ extern crate crypto;
 #[cfg(unix)]
 extern crate daemonize;
 extern crate directories;
+extern crate dirs;
 extern crate env_logger;
 #[macro_use]
 extern crate error_chain;

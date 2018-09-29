@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use chrono::{offset, DateTime, Duration};
+use dirs::home_dir;
 use futures::future::{self, Shared};
 use futures::{Async, Future, Stream};
 use hyper::client::{HttpConnector};
@@ -14,7 +15,6 @@ use serde_json::{from_str, Value};
 use std::ascii::AsciiExt;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::env;
 use std::env::*;
 use std::fs;
 use std::fs::File;
@@ -146,7 +146,7 @@ impl ProfileProvider {
         // Default credentials file location:
         // ~/.aws/credentials (Linux/Mac)
         // %USERPROFILE%\.aws\credentials  (Windows)
-        let profile_location = match env::home_dir() {
+        let profile_location = match home_dir() {
             Some(home_path) => {
                 let mut credentials_path = PathBuf::from(".aws");
 
