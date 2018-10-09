@@ -270,34 +270,10 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         // connections in separate tasks.
         let server = listener.incoming().for_each(move |socket| {
             trace!("incoming connection");
-
-            let (sink, stream) = SccacheTransport {
-                inner: WriteBincode::new(ReadBincode::new(Framed::new(socket))),
-            }.split();
-            let sink = sink.sink_from_err::<Error>();
-
-            let service = service.clone();
-
             tokio::runtime::current_thread::TaskExecutor::current().spawn_local(Box::new(
-                stream
-                    .from_err::<Error>()
-                    .and_then(move |input| service.call(input))
-                    .and_then(|message| {
-                        let f: Box<Stream<Item = _, Error = _>> = match message {
-                            Message::WithoutBody(message) => Box::new(stream::once(Ok(Frame::Message { message, body: false }))),
-                            Message::WithBody(message, body) => {
-                                Box::new(
-                                    stream::once(Ok(Frame::Message { message, body: true }))
-                                        .chain(body.map(|chunk| Frame::Body { chunk: Some(chunk) }))
-                                        .chain(stream::once(Ok(Frame::Body { chunk: None })))
-                                )
-                            }
-                        };
-                        Ok(f.from_err::<Error>())
-                    })
-                    .flatten()
-                    .forward(sink)
-                    .map(|_| ())
+                service
+                .clone()
+                    .bind(socket)
                     .map_err(|err| {
                         error!("{}", err);
                     })
@@ -491,6 +467,36 @@ impl<C> SccacheService<C>
             tx: tx,
             info: info,
         }
+    }
+
+    fn bind<T>(self, socket: T) -> impl Future<Item = (), Error = Error>
+    where
+        T: AsyncRead + AsyncWrite + 'static,
+    {
+        let (sink, stream) = SccacheTransport {
+            inner: WriteBincode::new(ReadBincode::new(Framed::new(socket))),
+        }.split();
+        let sink = sink.sink_from_err::<Error>();
+
+        stream
+            .from_err::<Error>()
+            .and_then(move |input| self.call(input))
+            .and_then(|message| {
+                let f: Box<Stream<Item = _, Error = _>> = match message {
+                    Message::WithoutBody(message) => Box::new(stream::once(Ok(Frame::Message { message, body: false }))),
+                    Message::WithBody(message, body) => {
+                        Box::new(
+                            stream::once(Ok(Frame::Message { message, body: true }))
+                                .chain(body.map(|chunk| Frame::Body { chunk: Some(chunk) }))
+                                .chain(stream::once(Ok(Frame::Body { chunk: None })))
+                        )
+                    }
+                };
+                Ok(f.from_err::<Error>())
+            })
+            .flatten()
+            .forward(sink)
+            .map(|_| ())
     }
 
     /// Get info and stats about the cache.
