@@ -56,8 +56,6 @@ use tokio;
 use tokio::runtime::current_thread::{Runtime, Handle};
 use tokio_io::codec::length_delimited::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_proto::streaming::pipeline::{Frame, Transport};
-use tokio_proto::streaming::{Body, Message};
 use tokio_serde_bincode::{ReadBincode, WriteBincode};
 use tokio_service::Service;
 use tokio_tcp::TcpListener;
@@ -384,8 +382,8 @@ struct SccacheService<C: CommandCreatorSync> {
     info: ActiveInfo,
 }
 
-type SccacheRequest = Message<Request, Body<(), Error>>;
-type SccacheResponse = Message<Response, Body<Response, Error>>;
+type SccacheRequest = Message<Request, Body<()>>;
+type SccacheResponse = Message<Response, Body<Response>>;
 
 /// Messages sent from all services to the main event loop indicating activity.
 ///
@@ -909,6 +907,49 @@ impl ServerInfo {
     }
 }
 
+enum Frame<R, R1> {
+    Body { chunk: Option<R1> },
+    Message { message: R, body: bool, }
+}
+
+struct Body<R> {
+    receiver: mpsc::Receiver<Result<R>>,
+}
+
+impl<R> Body<R> {
+    fn pair() -> (mpsc::Sender<Result<R>>, Self) {
+        let (tx, rx) = mpsc::channel(0);
+        (tx, Body { receiver: rx })
+    }
+}
+
+impl<R> Stream for Body<R> {
+    type Item = R;
+    type Error = Error;
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        match self.receiver.poll().unwrap() {
+            Async::Ready(Some(Ok(item))) => Ok(Async::Ready(Some(item))),
+            Async::Ready(Some(Err(err))) => Err(err),
+            Async::Ready(None) => Ok(Async::Ready(None)),
+            Async::NotReady => Ok(Async::NotReady),
+        }
+    }
+}
+
+enum Message<R, B> {
+    WithBody(R, B),
+    WithoutBody(R),
+}
+
+impl<R, B> Message<R, B> {
+    fn into_inner(self) -> R {
+        match self {
+            Message::WithBody(r, _) => r,
+            Message::WithoutBody(r) => r,
+        }
+    }
+}
+
 /// Implementation of `Stream + Sink` that tokio-proto is expecting
 ///
 /// This type is composed of a few layers:
@@ -929,7 +970,7 @@ struct SccacheTransport<I: AsyncRead + AsyncWrite> {
 }
 
 impl<I: AsyncRead + AsyncWrite> Stream for SccacheTransport<I> {
-    type Item = Message<Request, Body<(), Error>>;
+    type Item = Message<Request, Body<()>>;
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, io::Error> {
@@ -944,7 +985,7 @@ impl<I: AsyncRead + AsyncWrite> Stream for SccacheTransport<I> {
 }
 
 impl<I: AsyncRead + AsyncWrite> Sink for SccacheTransport<I> {
-    type SinkItem = Frame<Response, Response, Error>;
+    type SinkItem = Frame<Response, Response>;
     type SinkError = io::Error;
 
     fn start_send(&mut self, item: Self::SinkItem)
@@ -972,13 +1013,6 @@ impl<I: AsyncRead + AsyncWrite> Sink for SccacheTransport<I> {
                 }
             }
             Frame::Body { chunk: None } => Ok(AsyncSink::Ready),
-            Frame::Error { error } => {
-                error!("client hit an error:");
-                for e in error.iter() {
-                    error!("\t{}", e);
-                }
-                Err(io::Error::new(io::ErrorKind::Other, "application error"))
-            }
         }
     }
 
@@ -990,8 +1024,6 @@ impl<I: AsyncRead + AsyncWrite> Sink for SccacheTransport<I> {
         self.inner.close()
     }
 }
-
-impl<I: AsyncRead + AsyncWrite + 'static> Transport for SccacheTransport<I> {}
 
 struct ShutdownOrInactive {
     rx: mpsc::Receiver<ServerMessage>,
