@@ -50,6 +50,7 @@ use strip_ansi_escapes::Writer;
 use tokio::runtime::current_thread::Runtime;
 use tokio_io::AsyncRead;
 use tokio_io::io::read_exact;
+use tokio_timer::Timeout;
 use util::run_input_output;
 use which::which_in;
 
@@ -89,7 +90,6 @@ fn run_server_process() -> Result<ServerStartup> {
     use futures::Stream;
     use std::time::Duration;
     use tempdir::TempDir;
-    use tokio_timer::Timeout;
 
     trace!("run_server_process");
     let tempdir = TempDir::new("sccache")?;
@@ -242,12 +242,14 @@ fn redirect_error_log() -> Result<()> {
 #[cfg(windows)]
 fn run_server_process() -> Result<ServerStartup> {
     use kernel32;
-    use mio_named_pipes::NamedPipe;
     use std::mem;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
     use std::time::Duration;
-    use tokio_runtime::reactor::{Runtime, Timeout, PollEvented};
+    use futures::future;
+    use tokio::reactor::Handle;
+    use tokio::runtime::current_thread::Runtime;
+    use tokio_named_pipes::NamedPipe;
     use uuid::Uuid;
     use winapi::um::winbase::{CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS, CREATE_NEW_PROCESS_GROUP};
     use winapi::um::processthreadsapi::{PROCESS_INFORMATION, STARTUPINFOW, CreateProcessW};
@@ -257,14 +259,13 @@ fn run_server_process() -> Result<ServerStartup> {
 
     // Create a mini event loop and register our named pipe server
     let mut runtime = Runtime::new()?;
-    let handle = runtime.handle();
     let pipe_name = format!(r"\\.\pipe\{}", Uuid::new_v4().simple());
-    let server = NamedPipe::new(&pipe_name)?;
-    let server = PollEvented::new(server, &handle)?;
+    let server = runtime.block_on(future::lazy(|| NamedPipe::new(&pipe_name, &Handle::current())))?;
 
     // Connect a client to our server, and we'll wait below if it's still in
     // progress.
-    match server.get_ref().connect() {
+
+    match server.connect() {
         Ok(()) => {}
         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
         Err(e) => return Err(e.into()),
@@ -326,12 +327,16 @@ fn run_server_process() -> Result<ServerStartup> {
     let result = read_server_startup_status(server);
 
     let timeout = Duration::from_millis(SERVER_STARTUP_TIMEOUT_MS.into());
-    let timeout = Timeout::new(timeout, &handle)?.map_err(Error::from)
-        .map(|()| ServerStartup::TimedOut);
-    match runtime.block_on(result.select(timeout)) {
-        Ok((e, _other)) => Ok(e),
-        Err((e, _other)) => Err(e).chain_err(|| "failed waiting for server to start"),
-    }
+    let timeout = Timeout::new(result, timeout).or_else(|err| {
+        if err.is_elapsed() {
+            Ok(ServerStartup::TimedOut)
+        } else if err.is_inner() {
+            Err(err.into_inner().unwrap().into())
+        } else {
+            Err(err.into_timer().unwrap().into())
+        }
+    });
+    runtime.block_on(timeout)
 }
 
 /// Attempt to connect to an sccache server listening on `port`, or start one if no server is running.

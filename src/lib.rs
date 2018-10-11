@@ -61,8 +61,6 @@ extern crate libc;
 extern crate lru_disk_cache;
 #[cfg(feature = "memcached")]
 extern crate memcached;
-#[cfg(windows)]
-extern crate mio_named_pipes;
 extern crate num_cpus;
 extern crate number_prefix;
 #[cfg(feature = "openssl")]
@@ -75,6 +73,8 @@ extern crate regex;
 extern crate reqwest;
 extern crate retry;
 extern crate ring;
+#[cfg(windows)]
+extern crate tokio_named_pipes;
 #[cfg(feature = "rouille")]
 #[macro_use(router)]
 extern crate rouille;
@@ -90,6 +90,8 @@ extern crate time;
 extern crate tokio;
 extern crate tokio_io;
 extern crate tokio_process;
+#[cfg(windows)]
+extern crate tokio_reactor;
 extern crate tokio_serde_bincode;
 extern crate tokio_service;
 extern crate tokio_tcp;
