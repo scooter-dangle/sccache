@@ -104,21 +104,22 @@ impl Bucket {
                     body.fold(Vec::new(), |mut body, chunk| {
                         body.extend_from_slice(&chunk);
                         Ok::<_, reqwest::Error>(body)
-                    }).chain_err(|| "failed to read HTTP body")
-                        .and_then(move |bytes| {
-                            if let Some(len) = content_length {
-                                if len != bytes.len() as u64 {
-                                    bail!(format!(
-                                        "Bad HTTP body size read: {}, expected {}",
-                                        bytes.len(),
-                                        len
-                                    ));
-                                } else {
-                                    info!("Read {} bytes from {}", bytes.len(), url2);
-                                }
+                    })
+                    .chain_err(|| "failed to read HTTP body")
+                    .and_then(move |bytes| {
+                        if let Some(len) = content_length {
+                            if len != bytes.len() as u64 {
+                                bail!(format!(
+                                    "Bad HTTP body size read: {}, expected {}",
+                                    bytes.len(),
+                                    len
+                                ));
+                            } else {
+                                info!("Read {} bytes from {}", bytes.len(), url2);
                             }
-                            Ok(bytes)
-                        })
+                        }
+                        Ok(bytes)
+                    })
                 }),
         )
     }

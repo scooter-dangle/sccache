@@ -12,18 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use cache::{
-    Storage,
-    storage_from_config,
-};
+use cache::{storage_from_config, Storage};
 use compiler::{
-    CacheControl,
-    Compiler,
-    CompilerArguments,
-    CompilerHasher,
-    CompileResult,
+    get_compiler_info, CacheControl, CompileResult, Compiler, CompilerArguments, CompilerHasher,
     MissType,
-    get_compiler_info,
 };
 use config::CONFIG;
 use dist;
@@ -31,13 +23,10 @@ use filetime::FileTime;
 use futures::future;
 use futures::sync::mpsc;
 use futures::task::{self, Task};
-use futures::{Stream, Sink, Async, AsyncSink, Poll, StartSend, Future};
+use futures::{Async, AsyncSink, Future, Poll, Sink, StartSend, Stream};
 use futures_cpupool::CpuPool;
 use jobserver::Client;
-use mock_command::{
-    CommandCreatorSync,
-    ProcessCommandCreator,
-};
+use mock_command::{CommandCreatorSync, ProcessCommandCreator};
 use number_prefix::{binary_prefix, Prefixed, Standalone};
 use protocol::{Compile, CompileFinished, CompileResponse, Request, Response};
 use std::cell::RefCell;
@@ -46,20 +35,20 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::metadata;
 use std::io::{self, Write};
-use std::net::{SocketAddr, SocketAddrV4, Ipv4Addr};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
-use std::process::{Output, ExitStatus};
+use std::process::{ExitStatus, Output};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use std::u64;
 use tokio_core::net::TcpListener;
-use tokio_core::reactor::{Handle, Core, Timeout};
+use tokio_core::reactor::{Core, Handle, Timeout};
 use tokio_io::codec::length_delimited::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_proto::BindServer;
 use tokio_proto::streaming::pipeline::{Frame, ServerProto, Transport};
 use tokio_proto::streaming::{Body, Message};
+use tokio_proto::BindServer;
 use tokio_serde_bincode::{ReadBincode, WriteBincode};
 use tokio_service::Service;
 use util; //::fmt_duration_as_secs;
@@ -149,19 +138,20 @@ pub fn start_server(port: u16) -> Result<()> {
                 &CONFIG.dist.toolchains,
                 &CONFIG.dist.auth,
             ))
-        },
+        }
         #[cfg(not(feature = "dist-client"))]
         Some(_) => {
             warn!("Scheduler address configured but dist feature disabled, disabling distributed sccache");
             Arc::new(dist::NoopClient)
-        },
+        }
         None => {
             info!("No scheduler address configured, disabling distributed sccache");
             Arc::new(dist::NoopClient)
-        },
+        }
     };
     let storage = storage_from_config(&pool, &core.handle());
-    let res = SccacheServer::<ProcessCommandCreator>::new(port, pool, core, client, dist_client, storage);
+    let res =
+        SccacheServer::<ProcessCommandCreator>::new(port, pool, core, client, dist_client, storage);
     let notify = env::var_os("SCCACHE_STARTUP_NOTIFY");
     match res {
         Ok(srv) => {
@@ -190,12 +180,14 @@ pub struct SccacheServer<C: CommandCreatorSync> {
 }
 
 impl<C: CommandCreatorSync> SccacheServer<C> {
-    pub fn new(port: u16,
-               pool: CpuPool,
-               core: Core,
-               client: Client,
-               dist_client: Arc<dist::Client>,
-               storage: Arc<Storage>) -> Result<SccacheServer<C>> {
+    pub fn new(
+        port: u16,
+        pool: CpuPool,
+        core: Core,
+        client: Client,
+        dist_client: Arc<dist::Client>,
+        storage: Arc<Storage>,
+    ) -> Result<SccacheServer<C>> {
         let handle = core.handle();
         let addr = SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), port);
         let listener = TcpListener::bind(&SocketAddr::V4(addr), &handle)?;
@@ -204,13 +196,8 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         // connections.
         let (tx, rx) = mpsc::channel(1);
         let (wait, info) = WaitUntilZero::new();
-        let service = SccacheService::new(dist_client,
-                                          storage,
-                                          core.handle(),
-                                          &client,
-                                          pool,
-                                          tx,
-                                          info);
+        let service =
+            SccacheService::new(dist_client, storage, core.handle(), &client, pool, tx, info);
 
         Ok(SccacheServer {
             core: core,
@@ -258,15 +245,21 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
     /// otherwise the server may naturally shut down if it becomes idle for too
     /// long anyway.
     pub fn run<F>(self, shutdown: F) -> io::Result<()>
-        where F: Future,
+    where
+        F: Future,
     {
         self._run(Box::new(shutdown.then(|_| Ok(()))))
     }
 
-    fn _run<'a>(self, shutdown: Box<Future<Item = (), Error = ()> + 'a>)
-                -> io::Result<()>
-    {
-        let SccacheServer { mut core, listener, rx, service, timeout, wait } = self;
+    fn _run<'a>(self, shutdown: Box<Future<Item = (), Error = ()> + 'a>) -> io::Result<()> {
+        let SccacheServer {
+            mut core,
+            listener,
+            rx,
+            service,
+            timeout,
+            wait,
+        } = self;
 
         // Create our "server future" which will simply handle all incoming
         // connections in separate tasks.
@@ -295,11 +288,12 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
             a
         });
 
-	let mut futures = vec![
-            Box::new(server) as Box<Future<Item=_, Error=_>>,
-            Box::new(shutdown.map_err(|()| {
-                io::Error::new(io::ErrorKind::Other, "shutdown signal failed")
-            })),
+        let mut futures = vec![
+            Box::new(server) as Box<Future<Item = _, Error = _>>,
+            Box::new(
+                shutdown
+                    .map_err(|()| io::Error::new(io::ErrorKind::Other, "shutdown signal failed")),
+            ),
         ];
 
         let shutdown_idle = ShutdownOrInactive {
@@ -318,11 +312,12 @@ impl<C: CommandCreatorSync> SccacheServer<C> {
         })));
 
         let server = future::select_all(futures);
-        core.run(server)
-            .map_err(|p| p.0)?;
+        core.run(server).map_err(|p| p.0)?;
 
-        info!("moving into the shutdown phase now, waiting at most 10 seconds \
-              for all client requests to complete");
+        info!(
+            "moving into the shutdown phase now, waiting at most 10 seconds \
+             for all client requests to complete"
+        );
 
         // Once our server has shut down either due to inactivity or a manual
         // request we still need to give a bit of time for all active
@@ -394,7 +389,8 @@ pub enum ServerMessage {
 }
 
 impl<C> Service for SccacheService<C>
-    where C: CommandCreatorSync + 'static,
+where
+    C: CommandCreatorSync + 'static,
 {
     type Request = SccacheRequest;
     type Response = SccacheResponse;
@@ -413,7 +409,7 @@ impl<C> Service for SccacheService<C>
             Request::Compile(compile) => {
                 debug!("handle_client: compile");
                 self.stats.borrow_mut().compile_requests += 1;
-                return self.handle_compile(compile)
+                return self.handle_compile(compile);
             }
             Request::GetStats => {
                 debug!("handle_client: get_stats");
@@ -426,13 +422,17 @@ impl<C> Service for SccacheService<C>
             }
             Request::Shutdown => {
                 debug!("handle_client: shutdown");
-                let future = self.tx.clone().send(ServerMessage::Shutdown).then(|_| Ok(()));
+                let future = self
+                    .tx
+                    .clone()
+                    .send(ServerMessage::Shutdown)
+                    .then(|_| Ok(()));
                 let info_future = self.get_info();
-                return Box::new(future.join(info_future)
-                    .map(move |(_, info)| {
-                        Message::WithoutBody(Response::ShuttingDown(info))
-                    })
-                )
+                return Box::new(
+                    future
+                        .join(info_future)
+                        .map(move |(_, info)| Message::WithoutBody(Response::ShuttingDown(info))),
+                );
             }
         };
 
@@ -441,15 +441,18 @@ impl<C> Service for SccacheService<C>
 }
 
 impl<C> SccacheService<C>
-    where C: CommandCreatorSync,
+where
+    C: CommandCreatorSync,
 {
-    pub fn new(dist_client: Arc<dist::Client>,
-               storage: Arc<Storage>,
-               handle: Handle,
-               client: &Client,
-               pool: CpuPool,
-               tx: mpsc::Sender<ServerMessage>,
-               info: ActiveInfo) -> SccacheService<C> {
+    pub fn new(
+        dist_client: Arc<dist::Client>,
+        storage: Arc<Storage>,
+        handle: Handle,
+        client: &Client,
+        pool: CpuPool,
+        tx: mpsc::Sender<ServerMessage>,
+        info: ActiveInfo,
+    ) -> SccacheService<C> {
         SccacheService {
             stats: Rc::new(RefCell::new(ServerStats::default())),
             dist_client,
@@ -467,15 +470,16 @@ impl<C> SccacheService<C>
     fn get_info(&self) -> SFuture<ServerInfo> {
         let stats = self.stats.borrow().clone();
         let cache_location = self.storage.location();
-        Box::new(self.storage.current_size().join(self.storage.max_size())
-            .map(move |(cache_size, max_cache_size)| {
-                ServerInfo {
+        Box::new(
+            self.storage
+                .current_size()
+                .join(self.storage.max_size())
+                .map(move |(cache_size, max_cache_size)| ServerInfo {
                     stats,
                     cache_location,
                     cache_size,
                     max_cache_size,
-                }
-            })
+                }),
         )
     }
 
@@ -484,29 +488,30 @@ impl<C> SccacheService<C>
         *self.stats.borrow_mut() = ServerStats::default();
     }
 
-
     /// Handle a compile request from a client.
     ///
     /// This will handle a compile request entirely, generating a response with
     /// the inital information and an optional body which will eventually
     /// contain the results of the compilation.
-    fn handle_compile(&self, compile: Compile)
-                      -> SFuture<SccacheResponse>
-    {
+    fn handle_compile(&self, compile: Compile) -> SFuture<SccacheResponse> {
         let exe = compile.exe;
         let cmd = compile.args;
         let cwd = compile.cwd;
         let env_vars = compile.env_vars;
         let me = self.clone();
-        Box::new(self.compiler_info(exe.into(), &env_vars).map(move |info| {
-            me.check_compiler(info, cmd, cwd.into(), env_vars)
-        }))
+        Box::new(
+            self.compiler_info(exe.into(), &env_vars)
+                .map(move |info| me.check_compiler(info, cmd, cwd.into(), env_vars)),
+        )
     }
 
     /// Look up compiler info from the cache for the compiler `path`.
     /// If not cached, determine the compiler type and cache the result.
-    fn compiler_info(&self, path: PathBuf, env: &[(OsString, OsString)])
-                     -> SFuture<Option<Box<Compiler<C>>>> {
+    fn compiler_info(
+        &self,
+        path: PathBuf,
+        env: &[(OsString, OsString)],
+    ) -> SFuture<Option<Box<Compiler<C>>>> {
         trace!("compiler_info");
         let mtime = ftry!(metadata(&path).map(|attr| FileTime::from_last_modification_time(&attr)));
         //TODO: properly handle rustup overrides. Currently this will
@@ -514,7 +519,9 @@ impl<C> SccacheService<C>
         // https://github.com/mozilla/sccache/issues/87
         let result = match self.compilers.borrow().get(&path) {
             // It's a hit only if the mtime matches.
-            Some(&Some((ref c, ref cached_mtime))) if *cached_mtime == mtime => Some(Some(c.clone())),
+            Some(&Some((ref c, ref cached_mtime))) if *cached_mtime == mtime => {
+                Some(Some(c.clone()))
+            }
             // We cache non-results.
             Some(&None) => Some(None),
             _ => None,
@@ -534,7 +541,9 @@ impl<C> SccacheService<C>
                 let info = get_compiler_info(&self.creator, &path, env, &self.pool);
                 Box::new(info.then(move |info| {
                     let info = info.ok();
-                    me.compilers.borrow_mut().insert(path, info.clone().map(|i| (i, mtime)));
+                    me.compilers
+                        .borrow_mut()
+                        .insert(path, info.clone().map(|i| (i, mtime)));
                     Ok(info)
                 }))
             }
@@ -543,20 +552,21 @@ impl<C> SccacheService<C>
 
     /// Check that we can handle and cache `cmd` when run with `compiler`.
     /// If so, run `start_compile_task` to execute it.
-    fn check_compiler(&self,
-                      compiler: Option<Box<Compiler<C>>>,
-                      cmd: Vec<OsString>,
-                      cwd: PathBuf,
-                      env_vars: Vec<(OsString, OsString)>) -> SccacheResponse
-    {
+    fn check_compiler(
+        &self,
+        compiler: Option<Box<Compiler<C>>>,
+        cmd: Vec<OsString>,
+        cwd: PathBuf,
+        env_vars: Vec<(OsString, OsString)>,
+    ) -> SccacheResponse {
         let mut stats = self.stats.borrow_mut();
         match compiler {
             None => {
                 debug!("check_compiler: Unsupported compiler");
                 stats.requests_unsupported_compiler += 1;
-                return Message::WithoutBody(
-                    Response::Compile(CompileResponse::UnsupportedCompiler)
-                        );
+                return Message::WithoutBody(Response::Compile(
+                    CompileResponse::UnsupportedCompiler,
+                ));
             }
             Some(c) => {
                 debug!("check_compiler: Supported compiler");
@@ -569,12 +579,15 @@ impl<C> SccacheService<C>
                         let (tx, rx) = Body::pair();
                         self.start_compile_task(hasher, cmd, cwd, env_vars, tx);
                         let res = CompileResponse::CompileStarted;
-                        return Message::WithBody(Response::Compile(res), rx)
+                        return Message::WithBody(Response::Compile(res), rx);
                     }
                     CompilerArguments::CannotCache(why, extra_info) => {
                         //TODO: save counts of why
                         if let Some(extra_info) = extra_info {
-                            debug!("parse_arguments: CannotCache({}, {}): {:?}", why, extra_info, cmd)
+                            debug!(
+                                "parse_arguments: CannotCache({}, {}): {:?}",
+                                why, extra_info, cmd
+                            )
                         } else {
                             debug!("parse_arguments: CannotCache({}): {:?}", why, cmd)
                         }
@@ -595,15 +608,17 @@ impl<C> SccacheService<C>
     /// Given compiler arguments `arguments`, look up
     /// a compile result in the cache or execute the compilation and store
     /// the result in the cache.
-    fn start_compile_task(&self,
-                          hasher: Box<CompilerHasher<C>>,
-                          arguments: Vec<OsString>,
-                          cwd: PathBuf,
-                          env_vars: Vec<(OsString, OsString)>,
-                          tx: mpsc::Sender<Result<Response>>) {
-        let force_recache = env_vars.iter().any(|&(ref k, ref _v)| {
-            k.as_os_str() == OsStr::new("SCCACHE_RECACHE")
-        });
+    fn start_compile_task(
+        &self,
+        hasher: Box<CompilerHasher<C>>,
+        arguments: Vec<OsString>,
+        cwd: PathBuf,
+        env_vars: Vec<(OsString, OsString)>,
+        tx: mpsc::Sender<Result<Response>>,
+    ) {
+        let force_recache = env_vars
+            .iter()
+            .any(|&(ref k, ref _v)| k.as_os_str() == OsStr::new("SCCACHE_RECACHE"));
         let cache_control = if force_recache {
             CacheControl::ForceRecache
         } else {
@@ -611,15 +626,17 @@ impl<C> SccacheService<C>
         };
         let out_pretty = hasher.output_pretty().into_owned();
         let color_mode = hasher.color_mode();
-        let result = hasher.get_cached_or_compile(self.dist_client.clone(),
-                                                  self.creator.clone(),
-                                                  self.storage.clone(),
-                                                  arguments,
-                                                  cwd,
-                                                  env_vars,
-                                                  cache_control,
-                                                  self.pool.clone(),
-                                                  self.handle.clone());
+        let result = hasher.get_cached_or_compile(
+            self.dist_client.clone(),
+            self.creator.clone(),
+            self.storage.clone(),
+            arguments,
+            cwd,
+            env_vars,
+            cache_control,
+            self.pool.clone(),
+            self.handle.clone(),
+        );
         let me = self.clone();
         let task = result.then(move |result| {
             let mut cache_write = None;
@@ -635,7 +652,7 @@ impl<C> SccacheService<C>
                         CompileResult::CacheHit(duration) => {
                             stats.cache_hits += 1;
                             stats.cache_read_hit_duration += duration;
-                        },
+                        }
                         CompileResult::CacheMiss(miss_type, duration, future) => {
                             match miss_type {
                                 MissType::Normal => {}
@@ -661,7 +678,11 @@ impl<C> SccacheService<C>
                             stats.compile_fails += 1;
                         }
                     };
-                    let Output { status, stdout, stderr } = out;
+                    let Output {
+                        status,
+                        stdout,
+                        stderr,
+                    } = out;
                     trace!("CompileFinished retcode: {}", status);
                     match status.code() {
                         Some(code) => res.retcode = Some(code),
@@ -708,9 +729,11 @@ impl<C> SccacheService<C>
                     }
                     //TODO: save cache stats!
                     Ok(Some(info)) => {
-                        debug!("[{}]: Cache write finished in {}",
-                               info.object_file_pretty,
-                               util::fmt_duration_as_secs(&info.duration));
+                        debug!(
+                            "[{}]: Cache write finished in {}",
+                            info.object_file_pretty,
+                            util::fmt_duration_as_secs(&info.duration)
+                        );
                         me.stats.borrow_mut().cache_writes += 1;
                         me.stats.borrow_mut().cache_write_duration += info.duration;
                     }
@@ -826,10 +849,14 @@ impl ServerStats {
             }};
         }
 
-        let mut stats_vec = vec!();
+        let mut stats_vec = vec![];
         //TODO: this would be nice to replace with a custom derive implementation.
         set_stat!(stats_vec, self.compile_requests, "Compile requests");
-        set_stat!(stats_vec, self.requests_executed, "Compile requests executed");
+        set_stat!(
+            stats_vec,
+            self.requests_executed,
+            "Compile requests executed"
+        );
         set_stat!(stats_vec, self.cache_hits, "Cache hits");
         set_stat!(stats_vec, self.cache_misses, "Cache misses");
         set_stat!(stats_vec, self.cache_timeouts, "Cache timeouts");
@@ -838,17 +865,62 @@ impl ServerStats {
         set_stat!(stats_vec, self.cache_write_errors, "Cache write errors");
         set_stat!(stats_vec, self.compile_fails, "Compilation failures");
         set_stat!(stats_vec, self.cache_errors, "Cache errors");
-        set_stat!(stats_vec, self.non_cacheable_compilations, "Non-cacheable compilations");
-        set_stat!(stats_vec, self.requests_not_cacheable, "Non-cacheable calls");
-        set_stat!(stats_vec, self.requests_not_compile, "Non-compilation calls");
-        set_stat!(stats_vec, self.requests_unsupported_compiler, "Unsupported compiler calls");
-        set_duration_stat!(stats_vec, self.cache_write_duration, self.cache_writes, "Average cache write");
-        set_duration_stat!(stats_vec, self.cache_read_miss_duration, self.cache_misses, "Average cache read miss");
-        set_duration_stat!(stats_vec, self.cache_read_hit_duration, self.cache_hits, "Average cache read hit");
-        let name_width = stats_vec.iter().map(|&(ref n, _, _)| n.len()).max().unwrap();
-        let stat_width = stats_vec.iter().map(|&(_, ref s, _)| s.len()).max().unwrap();
+        set_stat!(
+            stats_vec,
+            self.non_cacheable_compilations,
+            "Non-cacheable compilations"
+        );
+        set_stat!(
+            stats_vec,
+            self.requests_not_cacheable,
+            "Non-cacheable calls"
+        );
+        set_stat!(
+            stats_vec,
+            self.requests_not_compile,
+            "Non-compilation calls"
+        );
+        set_stat!(
+            stats_vec,
+            self.requests_unsupported_compiler,
+            "Unsupported compiler calls"
+        );
+        set_duration_stat!(
+            stats_vec,
+            self.cache_write_duration,
+            self.cache_writes,
+            "Average cache write"
+        );
+        set_duration_stat!(
+            stats_vec,
+            self.cache_read_miss_duration,
+            self.cache_misses,
+            "Average cache read miss"
+        );
+        set_duration_stat!(
+            stats_vec,
+            self.cache_read_hit_duration,
+            self.cache_hits,
+            "Average cache read hit"
+        );
+        let name_width = stats_vec
+            .iter()
+            .map(|&(ref n, _, _)| n.len())
+            .max()
+            .unwrap();
+        let stat_width = stats_vec
+            .iter()
+            .map(|&(_, ref s, _)| s.len())
+            .max()
+            .unwrap();
         for (name, stat, suffix_len) in stats_vec {
-            println!("{:<name_width$} {:>stat_width$}", name, stat, name_width=name_width, stat_width=stat_width + suffix_len);
+            println!(
+                "{:<name_width$} {:>stat_width$}",
+                name,
+                stat,
+                name_width = name_width,
+                stat_width = stat_width + suffix_len
+            );
         }
         (name_width, stat_width)
     }
@@ -858,15 +930,29 @@ impl ServerInfo {
     /// Print info to stdout in a human-readable format.
     pub fn print(&self) {
         let (name_width, stat_width) = self.stats.print();
-        println!("{:<name_width$} {}", "Cache location", self.cache_location, name_width=name_width);
-        for &(name, val) in &[("Cache size", &self.cache_size),
-                             ("Max cache size", &self.max_cache_size)] {
+        println!(
+            "{:<name_width$} {}",
+            "Cache location",
+            self.cache_location,
+            name_width = name_width
+        );
+        for &(name, val) in &[
+            ("Cache size", &self.cache_size),
+            ("Max cache size", &self.max_cache_size),
+        ] {
             if let &Some(val) = val {
                 let (val, suffix) = match binary_prefix(val as f64) {
                     Standalone(bytes) => (bytes.to_string(), "bytes".to_string()),
                     Prefixed(prefix, n) => (format!("{:.0}", n), format!("{}B", prefix)),
                 };
-                println!("{:<name_width$} {:>stat_width$} {}", name, val, suffix, name_width=name_width, stat_width=stat_width);
+                println!(
+                    "{:<name_width$} {:>stat_width$} {}",
+                    name,
+                    val,
+                    suffix,
+                    name_width = name_width,
+                    stat_width = stat_width
+                );
             }
         }
     }
@@ -876,7 +962,8 @@ impl ServerInfo {
 struct SccacheProto;
 
 impl<I> ServerProto<I> for SccacheProto
-    where I: AsyncRead + AsyncWrite + 'static,
+where
+    I: AsyncRead + AsyncWrite + 'static,
 {
     type Request = Request;
     type RequestBody = ();
@@ -921,12 +1008,12 @@ impl<I: AsyncRead + AsyncWrite> Stream for SccacheTransport<I> {
             error!("SccacheTransport::poll failed: {}", e);
             io::Error::new(io::ErrorKind::Other, e)
         }));
-        Ok(msg.map(|m| {
-            Frame::Message {
+        Ok(msg
+            .map(|m| Frame::Message {
                 message: m,
                 body: false,
-            }
-        }).into())
+            })
+            .into())
     }
 }
 
@@ -934,30 +1021,21 @@ impl<I: AsyncRead + AsyncWrite> Sink for SccacheTransport<I> {
     type SinkItem = Frame<Response, Response, Error>;
     type SinkError = io::Error;
 
-    fn start_send(&mut self, item: Self::SinkItem)
-                  -> StartSend<Self::SinkItem, io::Error> {
+    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, io::Error> {
         match item {
-            Frame::Message { message, body } => {
-                match self.inner.start_send(message)? {
-                    AsyncSink::Ready => Ok(AsyncSink::Ready),
-                    AsyncSink::NotReady(message) => {
-                        Ok(AsyncSink::NotReady(Frame::Message {
-                            message: message,
-                            body: body,
-                        }))
-                    }
+            Frame::Message { message, body } => match self.inner.start_send(message)? {
+                AsyncSink::Ready => Ok(AsyncSink::Ready),
+                AsyncSink::NotReady(message) => Ok(AsyncSink::NotReady(Frame::Message {
+                    message: message,
+                    body: body,
+                })),
+            },
+            Frame::Body { chunk: Some(chunk) } => match self.inner.start_send(chunk)? {
+                AsyncSink::Ready => Ok(AsyncSink::Ready),
+                AsyncSink::NotReady(chunk) => {
+                    Ok(AsyncSink::NotReady(Frame::Body { chunk: Some(chunk) }))
                 }
-            }
-            Frame::Body { chunk: Some(chunk) } => {
-                match self.inner.start_send(chunk)? {
-                    AsyncSink::Ready => Ok(AsyncSink::Ready),
-                    AsyncSink::NotReady(chunk) => {
-                        Ok(AsyncSink::NotReady(Frame::Body {
-                            chunk: Some(chunk),
-                        }))
-                    }
-                }
-            }
+            },
             Frame::Body { chunk: None } => Ok(AsyncSink::Ready),
             Frame::Error { error } => {
                 error!("client hit an error:");
@@ -1035,14 +1113,19 @@ impl WaitUntilZero {
             blocker: None,
         }));
 
-        (WaitUntilZero { info: info.clone() }, ActiveInfo { info: info })
+        (
+            WaitUntilZero { info: info.clone() },
+            ActiveInfo { info: info },
+        )
     }
 }
 
 impl Clone for ActiveInfo {
     fn clone(&self) -> ActiveInfo {
         self.info.borrow_mut().active += 1;
-        ActiveInfo { info: self.info.clone() }
+        ActiveInfo {
+            info: self.info.clone(),
+        }
     }
 }
 

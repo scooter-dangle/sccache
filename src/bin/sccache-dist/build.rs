@@ -18,8 +18,7 @@ use libmount::Overlay;
 use lru_disk_cache::Error as LruError;
 use nix;
 use sccache::dist::{
-    BuildResult, CompileCommand, InputsReader, OutputData, TcCache, Toolchain,
-    BuilderIncoming,
+    BuildResult, BuilderIncoming, CompileCommand, InputsReader, OutputData, TcCache, Toolchain,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -27,15 +26,18 @@ use std::io;
 use std::iter;
 use std::path::{self, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::{Mutex};
+use std::sync::Mutex;
 use tar;
 
 use errors::*;
 
 fn check_output(output: &Output) {
     if !output.status.success() {
-        error!("===========\n{}\n==========\n\n\n\n=========\n{}\n===============\n\n\n",
-            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        error!(
+            "===========\n{}\n==========\n\n\n\n=========\n{}\n===============\n\n\n",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         panic!()
     }
 }
@@ -89,7 +91,11 @@ impl OverlayBuilder {
         }
     }
 
-    fn prepare_overlay_dirs(&self, tc: &Toolchain, tccache: &Mutex<TcCache>) -> Result<OverlaySpec> {
+    fn prepare_overlay_dirs(
+        &self,
+        tc: &Toolchain,
+        tccache: &Mutex<TcCache>,
+    ) -> Result<OverlaySpec> {
         let (toolchain_dir, id) = {
             let mut toolchain_dir_map = self.toolchain_dir_map.lock().unwrap();
             // Create the toolchain dir (if necessary) while we have an exclusive lock
@@ -101,11 +107,19 @@ impl OverlayBuilder {
                 let mut tccache = tccache.lock().unwrap();
                 let toolchain_rdr = match tccache.get(tc) {
                     Ok(rdr) => rdr,
-                    Err(LruError::FileNotInCache) => bail!("expected toolchain {}, but not available", tc.archive_id),
-                    Err(e) => return Err(Error::with_chain(e, "failed to get toolchain from cache")),
+                    Err(LruError::FileNotInCache) => {
+                        bail!("expected toolchain {}, but not available", tc.archive_id)
+                    }
+                    Err(e) => {
+                        return Err(Error::with_chain(e, "failed to get toolchain from cache"))
+                    }
                 };
                 tar::Archive::new(GzDecoder::new(toolchain_rdr)).unpack(&toolchain_dir)?;
-                assert!(toolchain_dir_map.insert(tc.clone(), (toolchain_dir, 0)).is_none())
+                assert!(
+                    toolchain_dir_map
+                        .insert(tc.clone(), (toolchain_dir, 0))
+                        .is_none()
+                )
             }
             let entry = toolchain_dir_map.get_mut(tc).unwrap();
             entry.1 += 1;
@@ -113,131 +127,189 @@ impl OverlayBuilder {
         };
 
         trace!("Creating build directory for {}-{}", tc.archive_id, id);
-        let build_dir = self.dir.join("builds").join(format!("{}-{}", tc.archive_id, id));
+        let build_dir = self
+            .dir
+            .join("builds")
+            .join(format!("{}-{}", tc.archive_id, id));
         fs::create_dir(&build_dir)?;
-        Ok(OverlaySpec { build_dir, toolchain_dir })
+        Ok(OverlaySpec {
+            build_dir,
+            toolchain_dir,
+        })
     }
 
-    fn perform_build(bubblewrap: &Path, compile_command: CompileCommand, inputs_rdr: InputsReader, output_paths: Vec<String>, overlay: &OverlaySpec) -> BuildResult {
+    fn perform_build(
+        bubblewrap: &Path,
+        compile_command: CompileCommand,
+        inputs_rdr: InputsReader,
+        output_paths: Vec<String>,
+        overlay: &OverlaySpec,
+    ) -> BuildResult {
         trace!("Compile environment: {:?}", compile_command.env_vars);
-        trace!("Compile command: {:?} {:?}", compile_command.executable, compile_command.arguments);
+        trace!(
+            "Compile command: {:?} {:?}",
+            compile_command.executable,
+            compile_command.arguments
+        );
 
-        crossbeam_utils::thread::scope(|scope| { scope.spawn(|| {
+        crossbeam_utils::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    // Now mounted filesystems will be automatically unmounted when this thread dies
+                    // (and tmpfs filesystems will be completely destroyed)
+                    nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS).unwrap();
+                    // Make sure that all future mount changes are private to this namespace
+                    // TODO: shouldn't need to add these annotations
+                    let source: Option<&str> = None;
+                    let fstype: Option<&str> = None;
+                    let data: Option<&str> = None;
+                    nix::mount::mount(
+                        source,
+                        "/",
+                        fstype,
+                        nix::mount::MsFlags::MS_REC | nix::mount::MsFlags::MS_PRIVATE,
+                        data,
+                    )
+                    .unwrap();
 
-            // Now mounted filesystems will be automatically unmounted when this thread dies
-            // (and tmpfs filesystems will be completely destroyed)
-            nix::sched::unshare(nix::sched::CloneFlags::CLONE_NEWNS).unwrap();
-            // Make sure that all future mount changes are private to this namespace
-            // TODO: shouldn't need to add these annotations
-            let source: Option<&str> = None;
-            let fstype: Option<&str> = None;
-            let data: Option<&str> = None;
-            nix::mount::mount(source, "/", fstype, nix::mount::MsFlags::MS_REC | nix::mount::MsFlags::MS_PRIVATE, data).unwrap();
+                    let work_dir = overlay.build_dir.join("work");
+                    let upper_dir = overlay.build_dir.join("upper");
+                    let target_dir = overlay.build_dir.join("target");
+                    fs::create_dir(&work_dir).unwrap();
+                    fs::create_dir(&upper_dir).unwrap();
+                    fs::create_dir(&target_dir).unwrap();
 
-            let work_dir = overlay.build_dir.join("work");
-            let upper_dir = overlay.build_dir.join("upper");
-            let target_dir = overlay.build_dir.join("target");
-            fs::create_dir(&work_dir).unwrap();
-            fs::create_dir(&upper_dir).unwrap();
-            fs::create_dir(&target_dir).unwrap();
+                    let () = Overlay::writable(
+                        iter::once(overlay.toolchain_dir.as_path()),
+                        upper_dir,
+                        work_dir,
+                        &target_dir,
+                    )
+                    .mount()
+                    .unwrap();
 
-            let () = Overlay::writable(
-                iter::once(overlay.toolchain_dir.as_path()),
-                upper_dir,
-                work_dir,
-                &target_dir,
-            ).mount().unwrap();
+                    trace!("copying in inputs");
+                    // Note that we don't unpack directly into the upperdir since there overlayfs has some
+                    // special marker files that we don't want to create by accident (or malicious intent)
+                    tar::Archive::new(inputs_rdr).unpack(&target_dir).unwrap();
 
-            trace!("copying in inputs");
-            // Note that we don't unpack directly into the upperdir since there overlayfs has some
-            // special marker files that we don't want to create by accident (or malicious intent)
-            tar::Archive::new(inputs_rdr).unpack(&target_dir).unwrap();
+                    let CompileCommand {
+                        executable,
+                        arguments,
+                        env_vars,
+                        cwd,
+                    } = compile_command;
+                    let cwd = Path::new(&cwd);
 
-            let CompileCommand { executable, arguments, env_vars, cwd } = compile_command;
-            let cwd = Path::new(&cwd);
+                    trace!("creating output directories");
+                    fs::create_dir_all(join_suffix(&target_dir, cwd)).unwrap();
+                    for path in output_paths.iter() {
+                        fs::create_dir_all(join_suffix(
+                            &target_dir,
+                            cwd.join(Path::new(path).parent().unwrap()),
+                        ))
+                        .unwrap();
+                    }
 
-            trace!("creating output directories");
-            fs::create_dir_all(join_suffix(&target_dir, cwd)).unwrap();
-            for path in output_paths.iter() {
-                fs::create_dir_all(join_suffix(&target_dir, cwd.join(Path::new(path).parent().unwrap()))).unwrap();
-            }
+                    trace!("performing compile");
+                    // Bubblewrap notes:
+                    // - We're running as uid 0 (to do the mounts above), and so bubblewrap is run as uid 0
+                    // - There's special handling in bubblewrap to compare uid and euid - of interest to us,
+                    //   if uid == euid == 0, bubblewrap preserves capabilities (not good!) so we explicitly
+                    //   drop all capabilities
+                    // - By entering a new user namespace means any set of capabilities do not apply to any
+                    //   other user namespace, i.e. you lose privileges. This is not strictly necessary because
+                    //   we're dropping caps anyway so it's irrelevant which namespace we're in, but it doesn't
+                    //   hurt.
+                    // - --unshare-all is not ideal as it happily continues if it fails to unshare either
+                    //   the user or cgroups namespace, so we list everything explicitly
+                    // - The order of bind vs proc + dev is important - the new root must be put in place
+                    //   first, otherwise proc and dev get hidden
+                    let mut cmd = Command::new(bubblewrap);
+                    cmd.arg("--die-with-parent")
+                        .args(&["--cap-drop", "ALL"])
+                        .args(&[
+                            "--unshare-user",
+                            "--unshare-cgroup",
+                            "--unshare-ipc",
+                            "--unshare-pid",
+                            "--unshare-net",
+                            "--unshare-uts",
+                        ])
+                        .arg("--bind")
+                        .arg(&target_dir)
+                        .arg("/")
+                        .args(&["--proc", "/proc"])
+                        .args(&["--dev", "/dev"])
+                        .arg("--chdir")
+                        .arg(cwd);
 
-            trace!("performing compile");
-            // Bubblewrap notes:
-            // - We're running as uid 0 (to do the mounts above), and so bubblewrap is run as uid 0
-            // - There's special handling in bubblewrap to compare uid and euid - of interest to us,
-            //   if uid == euid == 0, bubblewrap preserves capabilities (not good!) so we explicitly
-            //   drop all capabilities
-            // - By entering a new user namespace means any set of capabilities do not apply to any
-            //   other user namespace, i.e. you lose privileges. This is not strictly necessary because
-            //   we're dropping caps anyway so it's irrelevant which namespace we're in, but it doesn't
-            //   hurt.
-            // - --unshare-all is not ideal as it happily continues if it fails to unshare either
-            //   the user or cgroups namespace, so we list everything explicitly
-            // - The order of bind vs proc + dev is important - the new root must be put in place
-            //   first, otherwise proc and dev get hidden
-            let mut cmd = Command::new(bubblewrap);
-            cmd
-                .arg("--die-with-parent")
-                .args(&["--cap-drop", "ALL"])
-                .args(&[
-                    "--unshare-user", "--unshare-cgroup", "--unshare-ipc",
-                    "--unshare-pid", "--unshare-net", "--unshare-uts",
-                ])
-                .arg("--bind").arg(&target_dir).arg("/")
-                .args(&["--proc", "/proc"])
-                .args(&["--dev", "/dev"])
-                .arg("--chdir").arg(cwd);
-
-            for (k, v) in env_vars {
-                if k.contains("=") {
-                    warn!("Skipping environment variable: {:?}", k);
-                    continue
-                }
-                cmd.arg("--setenv").arg(k).arg(v);
-            }
-            cmd.arg("--");
-            cmd.arg(executable);
-            cmd.args(arguments);
-            let compile_output = cmd.output().unwrap();
-            trace!("compile_output: {:?}", compile_output);
-
-            let mut outputs = vec![];
-            trace!("retrieving {:?}", output_paths);
-            for path in output_paths {
-                let abspath = join_suffix(&target_dir, cwd.join(&path)); // Resolve in case it's relative since we copy it from the root level
-                match fs::File::open(abspath) {
-                    Ok(mut file) => {
-                        let output = OutputData::from_reader(file);
-                        outputs.push((path, output))
-                    },
-                    Err(e) => {
-                        if e.kind() == io::ErrorKind::NotFound {
-                            debug!("Missing output path {:?}", path)
-                        } else {
-                            panic!(e)
+                    for (k, v) in env_vars {
+                        if k.contains("=") {
+                            warn!("Skipping environment variable: {:?}", k);
+                            continue;
                         }
-                    },
-                }
-            }
-            BuildResult { output: compile_output.into(), outputs }
+                        cmd.arg("--setenv").arg(k).arg(v);
+                    }
+                    cmd.arg("--");
+                    cmd.arg(executable);
+                    cmd.args(arguments);
+                    let compile_output = cmd.output().unwrap();
+                    trace!("compile_output: {:?}", compile_output);
 
-        }).join().unwrap() })
+                    let mut outputs = vec![];
+                    trace!("retrieving {:?}", output_paths);
+                    for path in output_paths {
+                        let abspath = join_suffix(&target_dir, cwd.join(&path)); // Resolve in case it's relative since we copy it from the root level
+                        match fs::File::open(abspath) {
+                            Ok(mut file) => {
+                                let output = OutputData::from_reader(file);
+                                outputs.push((path, output))
+                            }
+                            Err(e) => {
+                                if e.kind() == io::ErrorKind::NotFound {
+                                    debug!("Missing output path {:?}", path)
+                                } else {
+                                    panic!(e)
+                                }
+                            }
+                        }
+                    }
+                    BuildResult {
+                        output: compile_output.into(),
+                        outputs,
+                    }
+                })
+                .join()
+                .unwrap()
+        })
     }
 
     fn finish_overlay(&self, _tc: &Toolchain, overlay: OverlaySpec) {
         // TODO: collect toolchain directories
 
-        let OverlaySpec { build_dir, toolchain_dir: _ } = overlay;
+        let OverlaySpec {
+            build_dir,
+            toolchain_dir: _,
+        } = overlay;
         fs::remove_dir_all(build_dir).unwrap();
     }
 }
 
 impl BuilderIncoming for OverlayBuilder {
     type Error = Error;
-    fn run_build(&self, tc: Toolchain, command: CompileCommand, outputs: Vec<String>, inputs_rdr: InputsReader, tccache: &Mutex<TcCache>) -> Result<BuildResult> {
+    fn run_build(
+        &self,
+        tc: Toolchain,
+        command: CompileCommand,
+        outputs: Vec<String>,
+        inputs_rdr: InputsReader,
+        tccache: &Mutex<TcCache>,
+    ) -> Result<BuildResult> {
         debug!("Preparing overlay");
-        let overlay = self.prepare_overlay_dirs(&tc, tccache).chain_err(|| "failed to prepare overlay dirs")?;
+        let overlay = self
+            .prepare_overlay_dirs(&tc, tccache)
+            .chain_err(|| "failed to prepare overlay dirs")?;
         debug!("Performing build in {:?}", overlay);
         let res = Self::perform_build(&self.bubblewrap, command, inputs_rdr, outputs, &overlay);
         debug!("Finishing with overlay");
@@ -275,7 +347,10 @@ impl DockerBuilder {
         info!("Performing initial Docker cleanup");
 
         let containers = {
-            let output = Command::new("docker").args(&["ps", "-a", "--format", "{{.ID}} {{.Image}}"]).output().unwrap();
+            let output = Command::new("docker")
+                .args(&["ps", "-a", "--format", "{{.ID}} {{.Image}}"])
+                .output()
+                .unwrap();
             check_output(&output);
             let stdout = String::from_utf8(output.stdout).unwrap();
             stdout.trim().to_owned()
@@ -286,19 +361,28 @@ impl DockerBuilder {
                 let mut iter = line.splitn(2, ' ');
                 let container_id = iter.next().unwrap();
                 let image_name = iter.next().unwrap();
-                if iter.next() != None { panic!() }
+                if iter.next() != None {
+                    panic!()
+                }
                 if image_name.starts_with("sccache-builder-") {
                     containers_to_rm.push(container_id)
                 }
             }
             if !containers_to_rm.is_empty() {
-                let output = Command::new("docker").args(&["rm", "-f"]).args(containers_to_rm).output().unwrap();
+                let output = Command::new("docker")
+                    .args(&["rm", "-f"])
+                    .args(containers_to_rm)
+                    .output()
+                    .unwrap();
                 check_output(&output)
             }
         }
 
         let images = {
-            let output = Command::new("docker").args(&["images", "--format", "{{.ID}} {{.Repository}}"]).output().unwrap();
+            let output = Command::new("docker")
+                .args(&["images", "--format", "{{.ID}} {{.Repository}}"])
+                .output()
+                .unwrap();
             check_output(&output);
             let stdout = String::from_utf8(output.stdout).unwrap();
             stdout.trim().to_owned()
@@ -309,13 +393,19 @@ impl DockerBuilder {
                 let mut iter = line.splitn(2, ' ');
                 let image_id = iter.next().unwrap();
                 let image_name = iter.next().unwrap();
-                if iter.next() != None { panic!() }
+                if iter.next() != None {
+                    panic!()
+                }
                 if image_name.starts_with("sccache-builder-") {
                     images_to_rm.push(image_id)
                 }
             }
             if !images_to_rm.is_empty() {
-                let output = Command::new("docker").args(&["rmi"]).args(images_to_rm).output().unwrap();
+                let output = Command::new("docker")
+                    .args(&["rmi"])
+                    .args(images_to_rm)
+                    .output()
+                    .unwrap();
                 check_output(&output)
             }
         }
@@ -338,13 +428,15 @@ impl DockerBuilder {
                 // (more fine-grained) mutex around the entry value and checking if its empty a second time
                 let image = {
                     let mut map = self.image_map.lock().unwrap();
-                    map.entry(tc.clone()).or_insert_with(|| {
-                        info!("Creating Docker image for {:?} (may block requests)", tc);
-                        Self::make_image(tc, tccache)
-                    }).clone()
+                    map.entry(tc.clone())
+                        .or_insert_with(|| {
+                            info!("Creating Docker image for {:?} (may block requests)", tc);
+                            Self::make_image(tc, tccache)
+                        })
+                        .clone()
                 };
                 Self::start_container(&image)
-            },
+            }
         }
     }
 
@@ -352,12 +444,18 @@ impl DockerBuilder {
         // TODO: collect images
 
         // Clean up any running processes
-        let output = Command::new("docker").args(&["exec", &cid, "/busybox", "kill", "-9", "-1"]).output().unwrap();
+        let output = Command::new("docker")
+            .args(&["exec", &cid, "/busybox", "kill", "-9", "-1"])
+            .output()
+            .unwrap();
         check_output(&output);
 
         // Check the diff and clean up the FS
         fn dodiff(cid: &str) -> String {
-            let output = Command::new("docker").args(&["diff", cid]).output().unwrap();
+            let output = Command::new("docker")
+                .args(&["diff", cid])
+                .output()
+                .unwrap();
             check_output(&output);
             let stdout = String::from_utf8(output.stdout).unwrap();
             stdout.trim().to_owned()
@@ -370,51 +468,73 @@ impl DockerBuilder {
                 let mut iter = line.splitn(2, ' ');
                 let changetype = iter.next().unwrap();
                 let changepath = iter.next().unwrap();
-                if iter.next() != None { panic!() }
+                if iter.next() != None {
+                    panic!()
+                }
                 // TODO: If files are created in this dir, it gets marked as modified.
                 // A similar thing applies to /root or /build etc
                 if changepath == "/tmp" {
-                    continue
+                    continue;
                 }
                 if changetype != "A" {
-                    warn!("Deleting container {}: path {} had a non-A changetype of {}", &cid, changepath, changetype);
+                    warn!(
+                        "Deleting container {}: path {} had a non-A changetype of {}",
+                        &cid, changepath, changetype
+                    );
                     shoulddelete = true;
-                    break
+                    break;
                 }
                 // Docker diff paths are in alphabetical order and we do `rm -rf`, so we might be able to skip
                 // calling Docker more than necessary (since it's slow)
                 if let Some(lastpath) = lastpath {
                     if Path::new(changepath).starts_with(lastpath) {
-                        continue
+                        continue;
                     }
                 }
                 lastpath = Some(changepath.clone());
-                let output = Command::new("docker").args(&["exec", &cid, "/busybox", "rm", "-rf", changepath]).output().unwrap();
+                let output = Command::new("docker")
+                    .args(&["exec", &cid, "/busybox", "rm", "-rf", changepath])
+                    .output()
+                    .unwrap();
                 check_output(&output);
             }
 
             let newdiff = dodiff(&cid);
             // See note about changepath == "/tmp" above
             if !shoulddelete && newdiff != "" && newdiff != "C /tmp" {
-                warn!("Deleted files, but container still has a diff: {:?}", newdiff);
+                warn!(
+                    "Deleted files, but container still has a diff: {:?}",
+                    newdiff
+                );
                 shoulddelete = true
             }
 
             if shoulddelete {
-                let output = Command::new("docker").args(&["rm", "-f", &cid]).output().unwrap();
+                let output = Command::new("docker")
+                    .args(&["rm", "-f", &cid])
+                    .output()
+                    .unwrap();
                 check_output(&output);
-                return
+                return;
             }
         }
 
         // Good as new, add it back to the container list
         trace!("Reclaimed container");
-        self.container_lists.lock().unwrap().get_mut(tc).unwrap().push(cid);
+        self.container_lists
+            .lock()
+            .unwrap()
+            .get_mut(tc)
+            .unwrap()
+            .push(cid);
     }
 
     fn make_image(tc: &Toolchain, tccache: &Mutex<TcCache>) -> String {
         let cid = {
-            let output = Command::new("docker").args(&["create", BASE_DOCKER_IMAGE, "/busybox", "true"]).output().unwrap();
+            let output = Command::new("docker")
+                .args(&["create", BASE_DOCKER_IMAGE, "/busybox", "true"])
+                .output()
+                .unwrap();
             check_output(&output);
             let stdout = String::from_utf8(output.stdout).unwrap();
             stdout.trim().to_owned()
@@ -428,16 +548,26 @@ impl DockerBuilder {
         };
 
         trace!("Copying in toolchain");
-        let mut process = Command::new("docker").args(&["cp", "-", &format!("{}:/", cid)]).stdin(Stdio::piped()).spawn().unwrap();
-        io::copy(&mut {toolchain_rdr}, &mut process.stdin.take().unwrap()).unwrap();
+        let mut process = Command::new("docker")
+            .args(&["cp", "-", &format!("{}:/", cid)])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        io::copy(&mut { toolchain_rdr }, &mut process.stdin.take().unwrap()).unwrap();
         let output = process.wait_with_output().unwrap();
         check_output(&output);
 
         let imagename = format!("sccache-builder-{}", &tc.archive_id);
-        let output = Command::new("docker").args(&["commit", &cid, &imagename]).output().unwrap();
+        let output = Command::new("docker")
+            .args(&["commit", &cid, &imagename])
+            .output()
+            .unwrap();
         check_output(&output);
 
-        let output = Command::new("docker").args(&["rm", "-f", &cid]).output().unwrap();
+        let output = Command::new("docker")
+            .args(&["rm", "-f", &cid])
+            .output()
+            .unwrap();
         check_output(&output);
 
         imagename
@@ -448,23 +578,51 @@ impl DockerBuilder {
         // init duties (reaping zombies). Also, because we kill -9 -1, that kills
         // the sleep (it's not a builtin) so it needs to be a loop.
         let output = Command::new("docker")
-            .args(&["run", "-d", image, "/busybox", "sh", "-c", "while true; do /busybox sleep 365d && /busybox true; done"]).output().unwrap();
+            .args(&[
+                "run",
+                "-d",
+                image,
+                "/busybox",
+                "sh",
+                "-c",
+                "while true; do /busybox sleep 365d && /busybox true; done",
+            ])
+            .output()
+            .unwrap();
         check_output(&output);
         let stdout = String::from_utf8(output.stdout).unwrap();
         stdout.trim().to_owned()
     }
 
-    fn perform_build(compile_command: CompileCommand, inputs_rdr: InputsReader, output_paths: Vec<String>, cid: &str) -> BuildResult {
+    fn perform_build(
+        compile_command: CompileCommand,
+        inputs_rdr: InputsReader,
+        output_paths: Vec<String>,
+        cid: &str,
+    ) -> BuildResult {
         trace!("Compile environment: {:?}", compile_command.env_vars);
-        trace!("Compile command: {:?} {:?}", compile_command.executable, compile_command.arguments);
+        trace!(
+            "Compile command: {:?} {:?}",
+            compile_command.executable,
+            compile_command.arguments
+        );
 
         trace!("copying in inputs");
-        let mut process = Command::new("docker").args(&["cp", "-", &format!("{}:/", cid)]).stdin(Stdio::piped()).spawn().unwrap();
-        io::copy(&mut {inputs_rdr}, &mut process.stdin.take().unwrap()).unwrap();
+        let mut process = Command::new("docker")
+            .args(&["cp", "-", &format!("{}:/", cid)])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        io::copy(&mut { inputs_rdr }, &mut process.stdin.take().unwrap()).unwrap();
         let output = process.wait_with_output().unwrap();
         check_output(&output);
 
-        let CompileCommand { executable, arguments, env_vars, cwd } = compile_command;
+        let CompileCommand {
+            executable,
+            arguments,
+            env_vars,
+            cwd,
+        } = compile_command;
         let cwd = Path::new(&cwd);
 
         trace!("creating output directories");
@@ -484,7 +642,7 @@ impl DockerBuilder {
         for (k, v) in env_vars {
             if k.contains("=") {
                 warn!("Skipping environment variable: {:?}", k);
-                continue
+                continue;
             }
             let mut env = k;
             env.push('=');
@@ -504,8 +662,12 @@ impl DockerBuilder {
         trace!("retrieving {:?}", output_paths);
         for path in output_paths {
             let abspath = cwd.join(&path); // Resolve in case it's relative since we copy it from the root level
-            // TODO: this isn't great, but cp gives it out as a tar
-            let output = Command::new("docker").args(&["exec", cid, "/busybox", "cat"]).arg(abspath).output().unwrap();
+                                           // TODO: this isn't great, but cp gives it out as a tar
+            let output = Command::new("docker")
+                .args(&["exec", cid, "/busybox", "cat"])
+                .arg(abspath)
+                .output()
+                .unwrap();
             if output.status.success() {
                 outputs.push((path, OutputData::from_reader(&*output.stdout)))
             } else {
@@ -513,14 +675,24 @@ impl DockerBuilder {
             }
         }
 
-        BuildResult { output: compile_output.into(), outputs }
+        BuildResult {
+            output: compile_output.into(),
+            outputs,
+        }
     }
 }
 
 impl BuilderIncoming for DockerBuilder {
     type Error = Error;
     // From Server
-    fn run_build(&self, tc: Toolchain, command: CompileCommand, outputs: Vec<String>, inputs_rdr: InputsReader, tccache: &Mutex<TcCache>) -> Result<BuildResult> {
+    fn run_build(
+        &self,
+        tc: Toolchain,
+        command: CompileCommand,
+        outputs: Vec<String>,
+        inputs_rdr: InputsReader,
+        tccache: &Mutex<TcCache>,
+    ) -> Result<BuildResult> {
         debug!("Finding container");
         let cid = self.get_container(&tc, tccache);
         debug!("Performing build with container {}", cid);

@@ -65,13 +65,13 @@ extern crate number_prefix;
 #[cfg(feature = "openssl")]
 extern crate openssl;
 extern crate rand;
-extern crate ring;
 #[cfg(feature = "redis")]
 extern crate redis;
 extern crate regex;
 #[cfg(feature = "reqwest")]
 extern crate reqwest;
 extern crate retry;
+extern crate ring;
 #[cfg(feature = "rouille")]
 #[macro_use(router)]
 extern crate rouille;

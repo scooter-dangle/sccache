@@ -13,19 +13,19 @@
 // limitations under the License.
 
 use bincode;
-use byteorder::{ByteOrder, BigEndian};
+use byteorder::{BigEndian, ByteOrder};
 use futures::Future;
 use futures_cpupool::CpuPool;
 use mock_command::{CommandChild, RunCommand};
-use ring::digest::{SHA512, Context};
+use ring::digest::{Context, SHA512};
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::hash::Hasher;
-use std::io::BufReader;
 use std::io::prelude::*;
+use std::io::BufReader;
 use std::path::Path;
-use std::process::{self,Stdio};
+use std::process::{self, Stdio};
 use std::time::Duration;
 
 use errors::*;
@@ -37,16 +37,21 @@ pub struct Digest {
 
 impl Digest {
     pub fn new() -> Digest {
-        Digest { inner: Context::new(&SHA512) }
+        Digest {
+            inner: Context::new(&SHA512),
+        }
     }
 
     /// Calculate the SHA-512 digest of the contents of `path`, running
     /// the actual hash computation on a background thread in `pool`.
     pub fn file<T>(path: T, pool: &CpuPool) -> SFuture<String>
-        where T: AsRef<Path>
+    where
+        T: AsRef<Path>,
     {
         let path = path.as_ref();
-        let f = ftry!(File::open(&path).chain_err(|| format!("Failed to open file for hashing: {:?}", path)));
+        let f = ftry!(
+            File::open(&path).chain_err(|| format!("Failed to open file for hashing: {:?}", path))
+        );
         Self::reader(f, pool)
     }
 
@@ -79,7 +84,7 @@ pub fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for &byte in bytes {
         s.push(hex(byte & 0xf));
-        s.push(hex((byte >> 4)& 0xf));
+        s.push(hex((byte >> 4) & 0xf));
     }
     return s;
 
@@ -92,31 +97,34 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 /// Format `duration` as seconds with a fractional component.
-pub fn fmt_duration_as_secs(duration: &Duration) -> String
-{
-    format!("{}.{:03} s", duration.as_secs(), duration.subsec_nanos() / 1000_000)
+pub fn fmt_duration_as_secs(duration: &Duration) -> String {
+    format!(
+        "{}.{:03} s",
+        duration.as_secs(),
+        duration.subsec_nanos() / 1000_000
+    )
 }
 
 /// If `input`, write it to `child`'s stdin while also reading `child`'s stdout and stderr, then wait on `child` and return its status and output.
 ///
 /// This was lifted from `std::process::Child::wait_with_output` and modified
 /// to also write to stdin.
-fn wait_with_input_output<T>(mut child: T, input: Option<Vec<u8>>)
-                             -> SFuture<process::Output>
-    where T: CommandChild + 'static,
+fn wait_with_input_output<T>(mut child: T, input: Option<Vec<u8>>) -> SFuture<process::Output>
+where
+    T: CommandChild + 'static,
 {
-    use tokio_io::io::{write_all, read_to_end};
+    use tokio_io::io::{read_to_end, write_all};
     let stdin = input.and_then(|i| {
-        child.take_stdin().map(|stdin| {
-            write_all(stdin, i).chain_err(|| "failed to write stdin")
-        })
+        child
+            .take_stdin()
+            .map(|stdin| write_all(stdin, i).chain_err(|| "failed to write stdin"))
     });
-    let stdout = child.take_stdout().map(|io| {
-        read_to_end(io, Vec::new()).chain_err(|| "failed to read stdout")
-    });
-    let stderr = child.take_stderr().map(|io| {
-        read_to_end(io, Vec::new()).chain_err(|| "failed to read stderr")
-    });
+    let stdout = child
+        .take_stdout()
+        .map(|io| read_to_end(io, Vec::new()).chain_err(|| "failed to read stdout"));
+    let stderr = child
+        .take_stderr()
+        .map(|io| read_to_end(io, Vec::new()).chain_err(|| "failed to read stderr"));
 
     // Finish writing stdin before waiting, because waiting drops stdin.
     let status = Future::and_then(stdin, |io| {
@@ -139,33 +147,37 @@ fn wait_with_input_output<T>(mut child: T, input: Option<Vec<u8>>)
 ///
 /// If the command returns a non-successful exit status, an error of `ErrorKind::ProcessError`
 /// will be returned containing the process output.
-pub fn run_input_output<C>(mut command: C, input: Option<Vec<u8>>)
-                           -> SFuture<process::Output>
-    where C: RunCommand
+pub fn run_input_output<C>(mut command: C, input: Option<Vec<u8>>) -> SFuture<process::Output>
+where
+    C: RunCommand,
 {
     let child = command
         .no_console()
-        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::inherit() })
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
 
-    Box::new(child
-             .and_then(|child| {
-                 wait_with_input_output(child, input).and_then(|output| {
-                     if output.status.success() {
-                         f_ok(output)
-                     } else {
-                         f_err(ErrorKind::ProcessError(output))
-                     }
-                 })
-             }))
+    Box::new(child.and_then(|child| {
+        wait_with_input_output(child, input).and_then(|output| {
+            if output.status.success() {
+                f_ok(output)
+            } else {
+                f_err(ErrorKind::ProcessError(output))
+            }
+        })
+    }))
 }
 
 /// Write `data` to `writer` with bincode serialization, prefixed by a `u32` length.
 pub fn write_length_prefixed_bincode<W, S>(mut writer: W, data: S) -> Result<()>
-    where W: Write,
-          S: Serialize,
+where
+    W: Write,
+    S: Serialize,
 {
     let bytes = bincode::serialize(&data)?;
     let mut len = [0; 4];
@@ -230,10 +242,10 @@ impl OsStrExt for OsStr {
             // u16 iterator we keep going, otherwise we've found a mismatch.
             if to_match < 0xd7ff {
                 if to_match != codepoint {
-                    return false
+                    return false;
                 }
             } else {
-                return false
+                return false;
             }
         }
 
@@ -253,7 +265,7 @@ impl OsStrExt for OsStr {
                 Some(ch) => ch,
                 None => {
                     let codepoints = u16s.collect::<Vec<_>>();
-                    return Some(OsString::from_wide(&codepoints))
+                    return Some(OsString::from_wide(&codepoints));
                 }
             };
 
@@ -262,10 +274,10 @@ impl OsStrExt for OsStr {
 
             if to_match < 0xd7ff {
                 if to_match != codepoint {
-                    return None
+                    return None;
                 }
             } else {
-                return None
+                return None;
             }
             u16s.next();
         }
@@ -299,8 +311,8 @@ pub fn ref_env(env: &[(OsString, OsString)]) -> impl Iterator<Item = (&OsString,
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::{OsStr, OsString};
     use super::OsStrExt;
+    use std::ffi::{OsStr, OsString};
 
     #[test]
     fn simple_starts_with() {
