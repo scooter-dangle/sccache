@@ -107,6 +107,7 @@ impl Bucket {
                 .put_object(rusoto_s3::PutObjectRequest {
                     bucket: self.name.clone(),
                     key: key.into(),
+                    body: Some(content.into()),
                     ..Default::default()
                 })
                 .map_err(|err| err.to_string().into())
