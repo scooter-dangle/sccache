@@ -19,6 +19,7 @@ use futures::future::Future;
 use simples3::{
     AutoRefreshingProvider, Bucket, ChainProvider, ProfileProvider, ProvideAwsCredentials, Ssl,
 };
+use std::env;
 use std::io;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
