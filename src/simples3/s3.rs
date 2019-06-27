@@ -86,7 +86,7 @@ impl Bucket {
             self.client
                 .get_object(rusoto_s3::GetObjectRequest {
                     bucket: self.name.clone(),
-                    key: "".into(),
+                    key: key.into(),
                     ..Default::default()
                 })
                 .map_err(|err| err.to_string().into())
@@ -107,6 +107,8 @@ impl Bucket {
                 .put_object(rusoto_s3::PutObjectRequest {
                     bucket: self.name.clone(),
                     key: key.into(),
+                    content_length: Some(content.len() as i64),
+                    content_type: Some("application/octet-stream".into()),
                     body: Some(content.into()),
                     ..Default::default()
                 })
