@@ -15,7 +15,7 @@ use hyper::header::HeaderValue;
 use hyper::Method;
 use hyperx::header;
 use reqwest;
-use reqwest::async::{Client, Request};
+use rusoto_s3::S3;
 use simples3::credential::*;
 use time;
 
@@ -62,7 +62,7 @@ fn signature(string_to_sign: &str, signing_key: &str) -> String {
 pub struct Bucket {
     name: String,
     base_url: String,
-    client: Client,
+    client: rusoto_s3::S3Client,
 }
 
 impl fmt::Display for Bucket {
@@ -77,15 +77,40 @@ impl Bucket {
         Ok(Bucket {
             name: name.to_owned(),
             base_url: base_url,
-            client: Client::new(),
+            client: rusoto_s3::S3Client::new(rusoto_core::Region::UsEast1),
         })
     }
 
     pub fn get(&self, key: &str, creds: Option<&AwsCredentials>) -> SFuture<Vec<u8>> {
-        panic!()
+        Box::new(
+            self.client
+                .get_object(rusoto_s3::GetObjectRequest {
+                    bucket: self.name.clone(),
+                    key: "".into(),
+                    ..Default::default()
+                })
+                .map_err(|err| err.to_string().into())
+                .and_then(|response| {
+                    response
+                        .body
+                        .unwrap()
+                        .concat()
+                        .map(|b| b.to_vec())
+                        .map_err(|err| err.to_string().into())
+                }),
+        )
     }
 
     pub fn put(&self, key: &str, content: Vec<u8>, creds: &AwsCredentials) -> SFuture<()> {
-        panic!()
+        Box::new(
+            self.client
+                .put_object(rusoto_s3::PutObjectRequest {
+                    bucket: self.name.clone(),
+                    key: key.into(),
+                    ..Default::default()
+                })
+                .map_err(|err| err.to_string().into())
+                .map(|_| ()),
+        )
     }
 }

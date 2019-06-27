@@ -77,6 +77,8 @@ extern crate ring;
 #[cfg(feature = "rouille")]
 #[macro_use(router)]
 extern crate rouille;
+extern crate rusoto_core;
+extern crate rusoto_s3;
 extern crate serde;
 extern crate serde_json;
 #[macro_use]
@@ -166,4 +168,3 @@ fn init_logging() {
         }
     }
 }
-
