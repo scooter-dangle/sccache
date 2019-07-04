@@ -13,7 +13,5 @@
 // limitations under the License.
 
 mod s3;
-mod credential;
 
 pub use crate::simples3::s3::*;
-pub use crate::simples3::credential::*;
