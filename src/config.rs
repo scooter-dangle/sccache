@@ -14,6 +14,7 @@
 
 use directories::ProjectDirs;
 use regex::Regex;
+use rusoto_core::Region;
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 #[cfg(any(feature = "dist-client", feature = "dist-server"))]
 use serde::ser::{Serialize, Serializer};
@@ -184,15 +185,15 @@ pub struct RedisCacheConfig {
     pub url: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct S3CacheConfig {
     pub bucket: String,
-    pub endpoint: String,
+    pub region: Region,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum CacheType {
     Azure(AzureCacheConfig),
     GCS(GCSCacheConfig),
@@ -396,16 +397,17 @@ pub struct EnvConfig {
 fn config_from_env() -> EnvConfig {
     let s3 = env::var("SCCACHE_BUCKET").ok()
         .map(|bucket| {
-            let endpoint = match env::var("SCCACHE_ENDPOINT") {
-                Ok(endpoint) => format!("{}/{}", endpoint, bucket),
-                _ => match env::var("SCCACHE_REGION") {
-                    Ok(ref region) if region != "us-east-1" =>
-                        format!("{}.s3-{}.amazonaws.com", bucket, region),
-                    _ => format!("{}.s3.amazonaws.com", bucket),
+            let region = match env::var("SCCACHE_ENDPOINT") {
+                Ok(endpoint) => Region::Custom {
+                    name: Region::default().name().into(),
+                    endpoint: format!("{}/{}", endpoint, bucket),
+                },
+                _ => match env::var("SCCACHE_REGION").ok().and_then(|s| s.parse().ok()) {
+                    Some(region) => region,
+                    None => Region::default(),
                 },
             };
-            S3CacheConfig { bucket, endpoint }
-        });
+            S3CacheConfig { bucket, region } });
 
     let redis = env::var("SCCACHE_REDIS").ok()
         .map(|url| RedisCacheConfig { url });
@@ -474,7 +476,7 @@ fn config_from_env() -> EnvConfig {
     EnvConfig { cache }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Config {
     pub caches: Vec<CacheType>,
     pub fallback_cache: DiskCacheConfig,
